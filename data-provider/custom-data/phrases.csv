@@ -1,0 +1,15 @@
+# QBopomofo 自訂詞庫
+#
+# 格式：詞,詞頻,注音（空格分隔）
+# 詞頻越高越優先顯示。上游 tsi.csv 的常見詞頻範圍：
+#   - 超高頻（的、是、我）: 50000+
+#   - 高頻（已經、可以）: 5000-50000
+#   - 中頻（嘗試、調整）: 500-5000
+#   - 低頻（罕用詞）: 0-500
+#
+# 注意：此檔會與上游 tsi.csv 合併編譯，同詞同音時以較高詞頻為準。
+#
+# dc:title,QBopomofo 自訂詞庫,
+# dc:rights,Copyright (c) 2026 TonyQ Wang,
+# dc:license,LGPL-2.1-or-later,
+# dc:identifier,2026.03.30,
