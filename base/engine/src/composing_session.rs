@@ -157,9 +157,22 @@ impl ComposingSession {
         false // handled internally, don't direct commit
     }
 
-    /// Delete the last English character. Returns true if there was something to delete.
+    /// Delete the last English character from the current buffer or from
+    /// the last English segment. Returns true if something was deleted.
     pub fn backspace_english(&mut self) -> bool {
-        self.english_buffer.pop().is_some()
+        // First try the current inline buffer
+        if self.english_buffer.pop().is_some() {
+            return true;
+        }
+        // Then try the last segment if it's English
+        if let Some(Segment::English(text)) = self.segments.last_mut() {
+            text.pop();
+            if text.is_empty() {
+                self.segments.pop();
+            }
+            return true;
+        }
+        false
     }
 
     // MARK: - Commit

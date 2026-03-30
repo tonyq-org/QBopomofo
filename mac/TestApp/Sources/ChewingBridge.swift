@@ -175,6 +175,15 @@ final class ChewingBridge: ObservableObject {
             }
         }
 
+        // Backspace with mixed content — try deleting from session first
+        if keyCode == 51 && qb_composing_has_mixed_content(session) != 0 {
+            if qb_composing_backspace_english(session) != 0 {
+                log("Key: Backspace (deleted English from segment)")
+                updateState()
+                return true
+            }
+        }
+
         // Enter with mixed content
         if keyCode == 36 && qb_composing_has_mixed_content(session) != 0 {
             commitAll()

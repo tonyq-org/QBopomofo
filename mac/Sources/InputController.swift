@@ -144,6 +144,14 @@ class QBopomofoInputController: IMKInputController {
             }
         }
 
+        // Backspace with mixed content — try deleting from session first
+        if keyCode == 51 && qb_composing_has_mixed_content(session) != 0 {
+            if qb_composing_backspace_english(session) != 0 {
+                updateClientDisplay(ctx: ctx, session: session, client: client)
+                return true
+            }
+        }
+
         // Enter/Escape with mixed content
         if keyCode == 36 && qb_composing_has_mixed_content(session) != 0 {
             commitAll(ctx: ctx, session: session, client: client)
