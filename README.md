@@ -4,12 +4,16 @@
 
 本專案的引擎核心與字詞庫資料源自 [Chewing（酷音）](https://chewing.im/) 開源專案，由 [libchewing Core Team](https://codeberg.org/chewing/libchewing) 及社群貢獻者多年維護。我們在此基礎上進行獨立發展。
 
-## 上游專案
+## 上游專案與分歧版本
 
-| 專案 | 說明 | 授權 |
-|------|------|------|
-| [libchewing](https://codeberg.org/chewing/libchewing) | 智慧注音輸入法引擎 | LGPL-2.1 |
-| [libchewing-data](https://codeberg.org/chewing/libchewing-data) | 字詞庫與詞頻資料 | LGPL-2.1 |
+本專案源自以下上游專案，並於下列版本分歧後獨立發展：
+
+| 專案 | 說明 | 授權 | 分歧點 |
+|------|------|------|--------|
+| [libchewing](https://codeberg.org/chewing/libchewing) | 智慧注音輸入法引擎 | LGPL-2.1 | [`100a0e0`](https://codeberg.org/chewing/libchewing/commit/100a0e09178532c570cc1680c97bc7541617426a)（2026-03-28） |
+| [libchewing-data](https://codeberg.org/chewing/libchewing-data) | 字詞庫與詞頻資料 | LGPL-2.1 | [`dd81960`](https://codeberg.org/chewing/libchewing-data/commit/dd81960c90a75d07c3a80b542d721694cc034665)（2026-03-26） |
+
+> 分歧後不再追蹤上游更新，引擎與資料均獨立維護。
 
 ## 專案結構
 
