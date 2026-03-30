@@ -1,0 +1,18 @@
+[mode]
+id = "q-bopomofo"
+name = "Q注音"
+description = "QBopomofo 預設模式 — 標準注音 + 自訂詞頻調校"
+
+[keyboard]
+layout = "standard"
+keymap = "qwerty"
+
+[conversion]
+engine = "chewing"
+
+[dictionaries]
+system = ["word.dat", "tsi.dat"]
+custom = ["phrases.csv"]
+
+[rules]
+boost_file = "custom-data/phrases.csv"

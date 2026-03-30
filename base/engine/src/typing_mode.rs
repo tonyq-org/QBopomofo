@@ -60,6 +60,21 @@ pub struct TypingMode {
 }
 
 impl TypingMode {
+    /// QBopomofo default mode — standard bopomofo with custom phrase tuning.
+    /// All our custom phrase adjustments (via /tune) are applied to this mode.
+    /// This is the primary mode for QBopomofo.
+    pub fn q_bopomofo() -> Self {
+        Self {
+            info: TypingModeInfo {
+                id: "q-bopomofo".into(),
+                name: "Q注音".into(),
+                description: "QBopomofo 預設模式 — 標準注音 + 自訂詞頻調校".into(),
+            },
+            layout: KeyboardLayout::Standard,
+            conversion: ConversionKind::Chewing,
+        }
+    }
+
     /// Create the standard bopomofo mode (DaChen keyboard + Chewing engine).
     pub fn standard_bopomofo() -> Self {
         Self {
@@ -131,9 +146,10 @@ impl TypingMode {
         editor.set_conversion_engine(self.create_conversion_engine());
     }
 
-    /// List all built-in typing modes.
+    /// List all built-in typing modes. Q注音 is first (default).
     pub fn all_modes() -> Vec<TypingMode> {
         vec![
+            Self::q_bopomofo(),
             Self::standard_bopomofo(),
             Self::fuzzy_bopomofo(),
             Self::hsu_bopomofo(),

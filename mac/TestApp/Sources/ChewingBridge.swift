@@ -25,7 +25,7 @@ final class ChewingBridge: ObservableObject {
     /// Log of engine events for debugging
     @Published var debugLog: [String] = []
     /// Current typing mode
-    @Published var currentMode: TypingModeSwift = .standardBopomofo
+    @Published var currentMode: TypingModeSwift = .qBopomofo
 
     private var ctx: OpaquePointer?
 
@@ -267,6 +267,7 @@ final class ChewingBridge: ObservableObject {
 /// Mirrors the Rust TypingMode — bundles layout + conversion engine.
 /// KB type values match the C enum in chewing.h.
 enum TypingModeSwift: String, CaseIterable, Identifiable {
+    case qBopomofo          // QBopomofo 預設模式（所有自訂調校的主要模式）
     case standardBopomofo
     case fuzzyBopomofo
     case hsuBopomofo
@@ -278,6 +279,7 @@ enum TypingModeSwift: String, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
+        case .qBopomofo: return "Q注音"
         case .standardBopomofo: return "標準注音"
         case .fuzzyBopomofo: return "模糊注音"
         case .hsuBopomofo: return "許氏注音"
@@ -290,6 +292,7 @@ enum TypingModeSwift: String, CaseIterable, Identifiable {
     /// Maps to KB enum in chewing.h (KB_DEFAULT=0, KB_HSU=1, etc.)
     var kbType: Int32 {
         switch self {
+        case .qBopomofo: return 0         // KB_DEFAULT（標準鍵盤 + 自訂詞頻）
         case .standardBopomofo: return 0  // KB_DEFAULT
         case .fuzzyBopomofo: return 0     // KB_DEFAULT (layout same, engine differs)
         case .hsuBopomofo: return 1       // KB_HSU
