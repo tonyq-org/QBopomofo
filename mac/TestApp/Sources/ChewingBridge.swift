@@ -86,33 +86,67 @@ final class ChewingBridge: ObservableObject {
         chewing_Reset(ctx)
         committedText = ""
         inlineEnglishBuffer = ""
+        mixedSegments = []
+        chineseSnapshotBeforeEnglish = ""
         isEnglishMode = false
         updateState()
         log("Engine reset")
     }
 
-    /// Commit all pending text (composing buffer + inline English)
+    /// Commit all pending text in correct mixed order.
+    ///
+    /// Strategy: we recorded snapshots of Chinese text before each English segment.
+    /// On commit, we replay: chinese_segment_1 + english_1 + chinese_segment_2 + english_2 + ...
     private func commitAll() {
         guard let ctx = ctx else { return }
 
-        // Commit chewing composing buffer first
+        // Get final chewing buffer content
+        var finalChinese = ""
         let bufLen = chewing_buffer_Len(ctx)
         if bufLen > 0 {
             chewing_handle_Enter(ctx)
             if chewing_commit_Check(ctx) != 0 {
                 if let commitStr = chewing_commit_String(ctx) {
-                    committedText += String(cString: commitStr)
+                    finalChinese = String(cString: commitStr)
                     chewing_free(commitStr)
                 }
             }
         }
 
-        // Then commit inline English
+        // Replay segments in order
+        var result = ""
+        for segment in mixedSegments {
+            switch segment {
+            case .chinese(let text):
+                result += text
+            case .english(let text):
+                result += text
+            }
+        }
+        // Append any remaining Chinese (typed after last English segment)
+        // The final Chinese is everything in the chewing buffer that wasn't
+        // already captured in a snapshot.
+        let alreadyCapturedChinese = mixedSegments
+            .compactMap { if case .chinese(let t) = $0 { return t } else { return nil } }
+            .joined()
+        if finalChinese.hasPrefix(alreadyCapturedChinese) {
+            let remaining = String(finalChinese.dropFirst(alreadyCapturedChinese.count))
+            result += remaining
+        } else {
+            result += finalChinese
+        }
+        // Append any remaining inline English
         if !inlineEnglishBuffer.isEmpty {
-            committedText += inlineEnglishBuffer
-            inlineEnglishBuffer = ""
+            result += inlineEnglishBuffer
         }
 
+        committedText += result
+        log("Commit all: \(result)")
+
+        // Reset
+        inlineEnglishBuffer = ""
+        mixedSegments = []
+        chineseSnapshotBeforeEnglish = ""
         updateState()
     }
 
@@ -134,10 +168,13 @@ final class ChewingBridge: ObservableObject {
             } else {
                 if shiftHeldDown && !shiftTypedWhileHeld {
                     // Short press — toggle mode
+                    let wasEnglish = isEnglishMode
                     isEnglishMode.toggle()
+                    recordModeSwitch(fromEnglish: wasEnglish)
                     log("Shift ↑ short press → \(isEnglishMode ? "英文" : "中文") mode")
                 } else if shiftHeldDown && shiftTypedWhileHeld && wasInChineseBeforeShift {
                     // Was held + typed — return to Chinese
+                    recordModeSwitch(fromEnglish: true)
                     isEnglishMode = false
                     log("Shift ↑ hold released → 回到中文 mode")
                 } else {
@@ -148,7 +185,9 @@ final class ChewingBridge: ObservableObject {
             }
         } else if shiftBehavior == .toggleOnly {
             if !isShiftDown {
+                let wasEnglish = isEnglishMode
                 isEnglishMode.toggle()
+                recordModeSwitch(fromEnglish: wasEnglish)
                 log("Shift ↑ toggle → \(isEnglishMode ? "英文" : "中文") mode")
             } else {
                 log("Shift ↓")
@@ -161,6 +200,13 @@ final class ChewingBridge: ObservableObject {
     private var wasInChineseBeforeShift = true
     /// English text typed inline during composing (mixed into 組字區)
     @Published var inlineEnglishBuffer: String = ""
+    /// Tracks segments of text in insertion order for correct commit ordering.
+    /// Each segment is either .chinese (committed from chewing engine at that point)
+    /// or .english (typed inline via Shift).
+    private var mixedSegments: [MixedSegment] = []
+    /// Snapshot of the chewing buffer when switching to English, so we know
+    /// what Chinese text was composed before the English segment.
+    private var chineseSnapshotBeforeEnglish: String = ""
 
     /// Process a key event. Returns true if the key was handled.
     func handleKey(keyCode: UInt16, characters: String, shift: Bool = false) -> Bool {
@@ -250,6 +296,8 @@ final class ChewingBridge: ObservableObject {
         case 53: // Escape
             chewing_handle_Esc(ctx)
             inlineEnglishBuffer = ""
+            mixedSegments = []
+            chineseSnapshotBeforeEnglish = ""
             isEnglishMode = false
             log("Key: Escape (清除組字區)")
             return true
@@ -395,6 +443,27 @@ final class ChewingBridge: ObservableObject {
         log("Preferences applied: shift=\(shiftBehavior), capsLock=\(capsLockBehavior), cand/page=\(candidatesPerPage)")
     }
 
+    /// Record a mode switch to track segment ordering.
+    private func recordModeSwitch(fromEnglish: Bool) {
+        guard let ctx = ctx else { return }
+        if fromEnglish {
+            // Switching FROM English to Chinese — save English segment
+            if !inlineEnglishBuffer.isEmpty {
+                mixedSegments.append(.english(inlineEnglishBuffer))
+                inlineEnglishBuffer = ""
+            }
+        } else {
+            // Switching FROM Chinese to English — snapshot Chinese buffer
+            if chewing_buffer_Len(ctx) > 0,
+               let bufStr = chewing_buffer_String(ctx) {
+                let snapshot = String(cString: bufStr)
+                chewing_free(bufStr)
+                mixedSegments.append(.chinese(snapshot))
+                chineseSnapshotBeforeEnglish = snapshot
+            }
+        }
+    }
+
     // MARK: - Helpers
 
     private func findProjectRoot() -> String {
@@ -489,6 +558,12 @@ enum ShiftBehaviorSwift: String, CaseIterable, Identifiable {
         case .toggleOnly: return "僅切換中/英"
         }
     }
+}
+
+/// A segment of text in the mixed composing buffer, preserving insertion order.
+enum MixedSegment {
+    case chinese(String)
+    case english(String)
 }
 
 enum CapsLockBehaviorSwift: String, CaseIterable, Identifiable {
