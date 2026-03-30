@@ -1,0 +1,15 @@
+[mode]
+id = "bopomofo-standard"
+name = "標準注音"
+description = "大千鍵盤標準注音"
+
+[keyboard]
+layout = "standard"
+keymap = "qwerty"
+
+[conversion]
+engine = "chewing"
+
+[dictionaries]
+system = ["word.dat", "tsi.dat"]
+custom = ["phrases.csv"]

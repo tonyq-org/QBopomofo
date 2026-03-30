@@ -83,4 +83,5 @@ pub mod dictionary;
 pub mod editor;
 pub mod input;
 pub mod path;
+pub mod typing_mode;
 pub mod zhuyin;

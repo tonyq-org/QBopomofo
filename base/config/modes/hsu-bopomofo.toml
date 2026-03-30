@@ -1,0 +1,15 @@
+[mode]
+id = "bopomofo-hsu"
+name = "許氏注音"
+description = "許氏鍵盤注音（單手可打）"
+
+[keyboard]
+layout = "hsu"
+keymap = "qwerty"
+
+[conversion]
+engine = "chewing"
+
+[dictionaries]
+system = ["word.dat", "tsi.dat"]
+custom = ["phrases.csv"]

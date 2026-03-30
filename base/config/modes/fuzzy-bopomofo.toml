@@ -1,0 +1,15 @@
+[mode]
+id = "bopomofo-fuzzy"
+name = "模糊注音"
+description = "容許相近發音的注音模式（ㄣ/ㄥ、ㄓ/ㄗ 等）"
+
+[keyboard]
+layout = "standard"
+keymap = "qwerty"
+
+[conversion]
+engine = "fuzzy-chewing"
+
+[dictionaries]
+system = ["word.dat", "tsi.dat"]
+custom = ["phrases.csv"]
