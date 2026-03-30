@@ -1,0 +1,82 @@
+/*
+ * QBopomofo composing session C API
+ *
+ * Manages mixed Chinese/English composing on top of the chewing context.
+ * Used by both macOS (Swift) and Windows (Rust) platforms.
+ */
+
+#ifndef qbopomofo_composing_h
+#define qbopomofo_composing_h
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/** Opaque handle for a QBopomofo composing session. */
+typedef struct QBComposingSession QBComposingSession;
+
+/** Shift behavior constants. */
+#define QB_SHIFT_NONE 0
+#define QB_SHIFT_SMART_TOGGLE 1
+#define QB_SHIFT_TOGGLE_ONLY 2
+
+/** Create a new ComposingSession with default Q注音 preferences. */
+QBComposingSession *qb_composing_new(void);
+
+/** Delete a ComposingSession. */
+void qb_composing_delete(QBComposingSession *session);
+
+/** Check if currently in English mode. Returns 1 if English, 0 if Chinese. */
+int qb_composing_is_english(const QBComposingSession *session);
+
+/** Check if there is mixed content (segments recorded). */
+int qb_composing_has_mixed_content(const QBComposingSession *session);
+
+/**
+ * Handle Shift key press/release.
+ * @param is_down 1 = pressed, 0 = released.
+ * @param chinese_buffer current chewing buffer content (UTF-8, NULL-terminated).
+ * @return 1 if mode changed, 0 if not.
+ */
+int qb_composing_handle_shift(QBComposingSession *session, int is_down, const char *chinese_buffer);
+
+/** Check if Shift is currently held down. */
+int qb_composing_is_shift_held(const QBComposingSession *session);
+
+/** Type an English character into the composing buffer. */
+void qb_composing_type_english(QBComposingSession *session, uint8_t ch);
+
+/** Delete the last English character. Returns 1 if deleted, 0 if empty. */
+int qb_composing_backspace_english(QBComposingSession *session);
+
+/** Get the English buffer content. Caller must free with chewing_free(). */
+char *qb_composing_english_buffer(const QBComposingSession *session);
+
+/**
+ * Build the full display string from segments + current buffers.
+ * @param chinese_buffer current chewing buffer (UTF-8).
+ * @param bopomofo current bopomofo reading (UTF-8).
+ * @return UTF-8 string. Caller must free with chewing_free().
+ */
+char *qb_composing_build_display(const QBComposingSession *session, const char *chinese_buffer, const char *bopomofo);
+
+/**
+ * Commit all content in correct order.
+ * @param final_chinese committed text from chewing_handle_Enter (UTF-8).
+ * @return The full committed string. Caller must free with chewing_free().
+ */
+char *qb_composing_commit_all(QBComposingSession *session, const char *final_chinese);
+
+/** Clear all composing state (Esc/reset). */
+void qb_composing_clear(QBComposingSession *session);
+
+/** Set Shift behavior. Use QB_SHIFT_* constants. */
+void qb_composing_set_shift_behavior(QBComposingSession *session, int behavior);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* qbopomofo_composing_h */

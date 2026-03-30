@@ -29,6 +29,7 @@
 //! properties for the input method implementations to extend their specific
 //! functionality.
 
+pub mod composing;
 mod io;
 mod logger;
 mod public;
