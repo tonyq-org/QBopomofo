@@ -1,34 +1,25 @@
 import Foundation
 import CChewing
 
-/// Swift wrapper around the chewing C API.
-/// Manages a chewing context and provides a clean interface for the test app.
+/// Swift wrapper around chewing C API + QBopomofo composing session.
+/// All composing logic (Shift SmartToggle, mixed segments, commit order)
+/// lives in the Rust engine via qb_composing_* C API.
+/// This class is purely a thin UI bridge.
 @MainActor
 final class ChewingBridge: ObservableObject {
 
     // MARK: - Published state (drives SwiftUI updates)
 
-    /// Current bopomofo reading (e.g. "ㄊㄞˊ")
     @Published var bopomofoReading: String = ""
-    /// Composed text in the pre-edit buffer (e.g. "台北")
     @Published var composingBuffer: String = ""
-    /// Combined display: buffer + current reading
     @Published var preEditDisplay: String = ""
-    /// Current candidate list
     @Published var candidates: [String] = []
-    /// Index of currently selected candidate
     @Published var selectedCandidateIndex: Int = 0
-    /// Whether candidate window should be shown
     @Published var showCandidates: Bool = false
-    /// Text that has been committed (accumulated output)
     @Published var committedText: String = ""
-    /// Whether currently in English input mode
     @Published var isEnglishMode: Bool = false
-    /// Log of engine events for debugging
     @Published var debugLog: [String] = []
-    /// Current typing mode
     @Published var currentMode: TypingModeSwift = .qBopomofo
-    /// Per-mode preferences
     @Published var shiftBehavior: ShiftBehaviorSwift = .smartToggle
     @Published var capsLockBehavior: CapsLockBehaviorSwift = .none
     @Published var candidatesPerPage: Int = 9
@@ -36,33 +27,31 @@ final class ChewingBridge: ObservableObject {
     @Published var escClearAll: Bool = true
     @Published var autoLearn: Bool = true
 
+    /// Chewing engine context (C API)
     private var ctx: OpaquePointer?
+    /// QBopomofo composing session (Rust C API) — manages Shift, mixed segments
+    private var session: OpaquePointer?
 
     init() {
         initEngine()
     }
 
     func cleanup() {
-        if let ctx = ctx {
-            chewing_delete(ctx)
-            self.ctx = nil
-        }
+        if let ctx = ctx { chewing_delete(ctx); self.ctx = nil }
+        if let session = session { qb_composing_delete(session); self.session = nil }
     }
 
     // MARK: - Engine Lifecycle
 
     func initEngine() {
-        // Set dictionary path to data-provider output
         let projectRoot = findProjectRoot()
         let dictPath = projectRoot + "/data-provider/output"
-        setenv("CHEWING_PATH", dictPath, 1)
-
-        // Also try test data as fallback
         let testDataPath = projectRoot + "/base/engine/tests/data"
         if !FileManager.default.fileExists(atPath: dictPath + "/word.dat") {
             setenv("CHEWING_PATH", testDataPath, 1)
             log("Using test data from: \(testDataPath)")
         } else {
+            setenv("CHEWING_PATH", dictPath, 1)
             log("Using dictionary data from: \(dictPath)")
         }
 
@@ -72,11 +61,20 @@ final class ChewingBridge: ObservableObject {
             return
         }
 
+        session = qb_composing_new()
+        guard session != nil else {
+            log("ERROR: Failed to create composing session")
+            return
+        }
+
         chewing_set_candPerPage(ctx, 9)
         chewing_set_maxChiSymbolLen(ctx, 20)
         chewing_set_spaceAsSelection(ctx, 1)
         chewing_set_escCleanAllBuf(ctx, 1)
         chewing_set_autoShiftCur(ctx, 1)
+
+        // Apply default shift behavior
+        qb_composing_set_shift_behavior(session, 1) // SmartToggle
 
         log("Engine initialized")
     }
@@ -84,191 +82,104 @@ final class ChewingBridge: ObservableObject {
     func reset() {
         guard let ctx = ctx else { return }
         chewing_Reset(ctx)
+        qb_composing_clear(session)
         committedText = ""
-        inlineEnglishBuffer = ""
-        mixedSegments = []
-        chineseSnapshotBeforeEnglish = ""
         isEnglishMode = false
         updateState()
         log("Engine reset")
     }
 
-    /// Commit all pending text in correct mixed order.
-    ///
-    /// Strategy: we recorded snapshots of Chinese text before each English segment.
-    /// On commit, we replay: chinese_segment_1 + english_1 + chinese_segment_2 + english_2 + ...
-    private func commitAll() {
-        guard let ctx = ctx else { return }
+    // MARK: - Shift Handling (delegates to Rust)
 
-        // Get final chewing buffer content
-        var finalChinese = ""
-        let bufLen = chewing_buffer_Len(ctx)
-        if bufLen > 0 {
-            chewing_handle_Enter(ctx)
-            if chewing_commit_Check(ctx) != 0 {
-                if let commitStr = chewing_commit_String(ctx) {
-                    finalChinese = String(cString: commitStr)
-                    chewing_free(commitStr)
-                }
-            }
+    func handleShiftToggle(isShiftDown: Bool) {
+        guard let ctx = ctx, let session = session else { return }
+
+        // Get current Chinese buffer to pass to Rust
+        let chineseBuf = getChewingBufferString()
+        let changed = chineseBuf.withCString { cStr in
+            qb_composing_handle_shift(session, isShiftDown ? 1 : 0, cStr)
         }
 
-        // Replay segments in order
-        var result = ""
-        for segment in mixedSegments {
-            switch segment {
-            case .chinese(let text):
-                result += text
-            case .english(let text):
-                result += text
-            }
-        }
-        // Append any remaining Chinese (typed after last English segment)
-        // The final Chinese is everything in the chewing buffer that wasn't
-        // already captured in a snapshot.
-        let alreadyCapturedChinese = mixedSegments
-            .compactMap { if case .chinese(let t) = $0 { return t } else { return nil } }
-            .joined()
-        if finalChinese.hasPrefix(alreadyCapturedChinese) {
-            let remaining = String(finalChinese.dropFirst(alreadyCapturedChinese.count))
-            result += remaining
+        isEnglishMode = qb_composing_is_english(session) != 0
+
+        if isShiftDown {
+            log("Shift ↓")
+        } else if changed != 0 {
+            log("Shift ↑ → \(isEnglishMode ? "英文" : "中文") mode")
         } else {
-            result += finalChinese
-        }
-        // Append any remaining inline English
-        if !inlineEnglishBuffer.isEmpty {
-            result += inlineEnglishBuffer
+            log("Shift ↑")
         }
 
-        committedText += result
-        log("Commit all: \(result)")
-
-        // Reset
-        inlineEnglishBuffer = ""
-        mixedSegments = []
-        chineseSnapshotBeforeEnglish = ""
         updateState()
     }
 
     // MARK: - Key Handling
 
-    /// Handle Shift key press/release for SmartToggle behavior.
-    /// Call this from flagsChanged event.
-    func handleShiftToggle(isShiftDown: Bool) {
-        if shiftBehavior == .none {
-            log("Shift \(isShiftDown ? "↓" : "↑") (behavior: none, ignored)")
-            return
-        }
-
-        if shiftBehavior == .smartToggle {
-            if isShiftDown {
-                shiftHeldDown = true
-                wasInChineseBeforeShift = !isEnglishMode
-                log("Shift ↓ (SmartToggle: waiting for release or typing)")
-            } else {
-                if shiftHeldDown && !shiftTypedWhileHeld {
-                    // Short press — toggle mode
-                    let wasEnglish = isEnglishMode
-                    isEnglishMode.toggle()
-                    recordModeSwitch(fromEnglish: wasEnglish)
-                    log("Shift ↑ short press → \(isEnglishMode ? "英文" : "中文") mode")
-                } else if shiftHeldDown && shiftTypedWhileHeld && wasInChineseBeforeShift {
-                    // Was held + typed — return to Chinese
-                    recordModeSwitch(fromEnglish: true)
-                    isEnglishMode = false
-                    log("Shift ↑ hold released → 回到中文 mode")
-                } else {
-                    log("Shift ↑")
-                }
-                shiftHeldDown = false
-                shiftTypedWhileHeld = false
-            }
-        } else if shiftBehavior == .toggleOnly {
-            if !isShiftDown {
-                let wasEnglish = isEnglishMode
-                isEnglishMode.toggle()
-                recordModeSwitch(fromEnglish: wasEnglish)
-                log("Shift ↑ toggle → \(isEnglishMode ? "英文" : "中文") mode")
-            } else {
-                log("Shift ↓")
-            }
-        }
-    }
-
-    private var shiftHeldDown = false
-    private var shiftTypedWhileHeld = false
-    private var wasInChineseBeforeShift = true
-    /// English text typed inline during composing (mixed into 組字區)
-    @Published var inlineEnglishBuffer: String = ""
-    /// Tracks segments of text in insertion order for correct commit ordering.
-    /// Each segment is either .chinese (committed from chewing engine at that point)
-    /// or .english (typed inline via Shift).
-    private var mixedSegments: [MixedSegment] = []
-    /// Snapshot of the chewing buffer when switching to English, so we know
-    /// what Chinese text was composed before the English segment.
-    private var chineseSnapshotBeforeEnglish: String = ""
-
-    /// Process a key event. Returns true if the key was handled.
     func handleKey(keyCode: UInt16, characters: String, shift: Bool = false) -> Bool {
-        guard let ctx = ctx else { return false }
+        guard let ctx = ctx, let session = session else { return false }
 
-        // If Shift is held and we're in SmartToggle, type English into composing buffer
-        if shift && shiftHeldDown && shiftBehavior == .smartToggle {
-            shiftTypedWhileHeld = true
+        // Shift held + typing → temporary English via Rust session
+        if shift && qb_composing_is_shift_held(session) != 0 {
             if let ch = characters.first, ch.isASCII {
-                inlineEnglishBuffer += String(ch)
-                isEnglishMode = true
+                qb_composing_type_english(session, UInt8(ch.asciiValue ?? 0))
+                isEnglishMode = qb_composing_is_english(session) != 0
                 log("Key (temp English → 組字區): '\(ch)'")
                 updateState()
                 return true
             }
         }
 
-        // English mode (toggled) — type English into composing buffer
-        if isEnglishMode {
-            if keyCode == 53 { // Escape — cancel composing
-                inlineEnglishBuffer = ""
+        // English mode — type into session
+        if qb_composing_is_english(session) != 0 {
+            if keyCode == 53 { // Escape
+                qb_composing_clear(session)
+                chewing_handle_Esc(ctx)
                 isEnglishMode = false
-                log("Key: Escape (取消英文組字)")
+                log("Key: Escape (清除組字區)")
                 updateState()
                 return true
             }
-            if keyCode == 36 { // Enter — commit everything
+            if keyCode == 36 { // Enter — commit all
                 commitAll()
                 log("Key: Enter (commit all)")
                 return true
             }
             if keyCode == 51 { // Backspace
-                if !inlineEnglishBuffer.isEmpty {
-                    inlineEnglishBuffer.removeLast()
-                    log("Key: Backspace (English buffer)")
+                if qb_composing_backspace_english(session) != 0 {
+                    log("Key: Backspace (English)")
                     updateState()
                     return true
                 }
             }
             if let ch = characters.first, ch.isASCII, !ch.isNewline {
-                inlineEnglishBuffer += String(ch)
+                qb_composing_type_english(session, UInt8(ch.asciiValue ?? 0))
                 log("Key (English → 組字區): '\(ch)'")
                 updateState()
                 return true
             }
         }
 
-        // English text stays in inlineEnglishBuffer — no auto-commit.
-        // Both Chinese and English will be committed together on Enter.
-
-        // Enter with mixed content — use commitAll to preserve order
-        if keyCode == 36 && (!inlineEnglishBuffer.isEmpty || !mixedSegments.isEmpty) {
+        // Enter with mixed content
+        if keyCode == 36 && qb_composing_has_mixed_content(session) != 0 {
             commitAll()
             log("Key: Enter (commit all: Chinese + English)")
             return true
         }
 
+        // Escape with mixed content
+        if keyCode == 53 && qb_composing_has_mixed_content(session) != 0 {
+            qb_composing_clear(session)
+            chewing_handle_Esc(ctx)
+            isEnglishMode = false
+            log("Key: Escape (清除組字區)")
+            updateState()
+            return true
+        }
+
         // Chinese mode — send to chewing engine
-        let handled = processKey(ctx: ctx, keyCode: keyCode, chars: characters, shift: shift)
+        let handled = processKey(ctx: ctx, keyCode: keyCode, chars: characters)
 
         if handled {
-            // Check for committed text
             if chewing_commit_Check(ctx) != 0 {
                 if let commitStr = chewing_commit_String(ctx) {
                     let text = String(cString: commitStr)
@@ -283,62 +194,59 @@ final class ChewingBridge: ObservableObject {
         return handled
     }
 
-    private func processKey(ctx: OpaquePointer, keyCode: UInt16, chars: String, shift: Bool) -> Bool {
+    private func processKey(ctx: OpaquePointer, keyCode: UInt16, chars: String) -> Bool {
         switch keyCode {
-        case 36: // Return
+        case 36:
             chewing_handle_Enter(ctx)
             log("Key: Enter")
             return true
-        case 51: // Backspace
+        case 51:
             chewing_handle_Backspace(ctx)
             log("Key: Backspace")
             return true
-        case 53: // Escape
+        case 53:
             chewing_handle_Esc(ctx)
-            inlineEnglishBuffer = ""
-            mixedSegments = []
-            chineseSnapshotBeforeEnglish = ""
             isEnglishMode = false
             log("Key: Escape (清除組字區)")
             return true
-        case 49: // Space
+        case 49:
             chewing_handle_Space(ctx)
             log("Key: Space")
             return true
-        case 48: // Tab
+        case 48:
             chewing_handle_Tab(ctx)
             log("Key: Tab")
             return true
-        case 117: // Delete
+        case 117:
             chewing_handle_Del(ctx)
             log("Key: Delete")
             return true
-        case 123: // Left
+        case 123:
             chewing_handle_Left(ctx)
             log("Key: Left")
             return true
-        case 124: // Right
+        case 124:
             chewing_handle_Right(ctx)
             log("Key: Right")
             return true
-        case 125: // Down
+        case 125:
             chewing_handle_Down(ctx)
             log("Key: Down")
             return true
-        case 126: // Up
+        case 126:
             chewing_handle_Up(ctx)
             log("Key: Up")
             return true
-        case 116: // Page Up
+        case 116:
             chewing_handle_PageUp(ctx)
             return true
-        case 121: // Page Down
+        case 121:
             chewing_handle_PageDown(ctx)
             return true
-        case 115: // Home
+        case 115:
             chewing_handle_Home(ctx)
             return true
-        case 119: // End
+        case 119:
             chewing_handle_End(ctx)
             return true
         default:
@@ -352,14 +260,46 @@ final class ChewingBridge: ObservableObject {
             log("Key: '\(firstChar)' (code: \(charCode))")
             return true
         }
-
         return false
+    }
+
+    // MARK: - Commit
+
+    private func commitAll() {
+        guard let ctx = ctx, let session = session else { return }
+
+        // Get Chinese text from chewing engine
+        var finalChinese = ""
+        if chewing_buffer_Len(ctx) > 0 {
+            chewing_handle_Enter(ctx)
+            if chewing_commit_Check(ctx) != 0 {
+                if let commitStr = chewing_commit_String(ctx) {
+                    finalChinese = String(cString: commitStr)
+                    chewing_free(commitStr)
+                }
+            }
+        }
+
+        // Let Rust session build the correctly-ordered result
+        let result = finalChinese.withCString { cStr -> String in
+            if let resultPtr = qb_composing_commit_all(session, cStr) {
+                let s = String(cString: resultPtr)
+                chewing_free(resultPtr)
+                return s
+            }
+            return finalChinese
+        }
+
+        committedText += result
+        isEnglishMode = false
+        log("Commit all: \(result)")
+        updateState()
     }
 
     // MARK: - State Update
 
     private func updateState() {
-        guard let ctx = ctx else { return }
+        guard let ctx = ctx, let session = session else { return }
 
         // Bopomofo reading
         if chewing_bopomofo_Check(ctx) != 0,
@@ -379,30 +319,20 @@ final class ChewingBridge: ObservableObject {
             composingBuffer = ""
         }
 
-        // Pre-edit display: replay segments + current unsaved content
-        // Segments contain already-recorded Chinese snapshots and English text.
-        // Current chewing buffer may have grown since last snapshot.
-        var display = ""
-        let alreadySnapshotted = mixedSegments
-            .compactMap { if case .chinese(let t) = $0 { return t } else { return nil } }
-            .joined()
-        for segment in mixedSegments {
-            switch segment {
-            case .chinese(let text):
-                display += text
-            case .english(let text):
-                display += text
+        // Build full display via Rust session (handles mixed segment ordering)
+        preEditDisplay = composingBuffer.withCString { chinBuf in
+            bopomofoReading.withCString { bopoBuf in
+                if let displayPtr = qb_composing_build_display(session, chinBuf, bopoBuf) {
+                    let s = String(cString: displayPtr)
+                    chewing_free(displayPtr)
+                    return s
+                }
+                return composingBuffer + bopomofoReading
             }
         }
-        // Append the part of composingBuffer that's new since last snapshot
-        if composingBuffer.hasPrefix(alreadySnapshotted) {
-            display += String(composingBuffer.dropFirst(alreadySnapshotted.count))
-        } else if !composingBuffer.isEmpty {
-            display += composingBuffer
-        }
-        display += bopomofoReading
-        display += inlineEnglishBuffer
-        preEditDisplay = display
+
+        // English mode sync
+        isEnglishMode = qb_composing_is_english(session) != 0
 
         // Candidates
         let totalPage = chewing_cand_TotalPage(ctx)
@@ -427,10 +357,20 @@ final class ChewingBridge: ObservableObject {
 
     // MARK: - Helpers
 
+    private func getChewingBufferString() -> String {
+        guard let ctx = ctx else { return "" }
+        if chewing_buffer_Len(ctx) > 0,
+           let bufStr = chewing_buffer_String(ctx) {
+            let s = String(cString: bufStr)
+            chewing_free(bufStr)
+            return s
+        }
+        return ""
+    }
+
     private func log(_ message: String) {
         let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
         debugLog.append("[\(timestamp)] \(message)")
-        // Keep last 100 entries
         if debugLog.count > 100 {
             debugLog.removeFirst(debugLog.count - 100)
         }
@@ -439,17 +379,19 @@ final class ChewingBridge: ObservableObject {
     // MARK: - TypingMode Switching
 
     func switchMode(_ mode: TypingModeSwift) {
-        guard let ctx = ctx else { return }
-
-        // Switch keyboard layout
+        guard let ctx = ctx, let session = session else { return }
         chewing_set_KBType(ctx, mode.kbType)
-
-        // Switch conversion engine
         chewing_config_set_int(ctx, "chewing.conversion_engine", mode.conversionEngine)
-
-        // Apply mode's default preferences
         shiftBehavior = mode.defaultShiftBehavior
         capsLockBehavior = mode.defaultCapsLockBehavior
+
+        // Sync shift behavior to Rust session
+        let shiftVal: Int32 = switch shiftBehavior {
+        case .none: 0
+        case .smartToggle: 1
+        case .toggleOnly: 2
+        }
+        qb_composing_set_shift_behavior(session, shiftVal)
 
         currentMode = mode
         applyPreferences()
@@ -461,35 +403,11 @@ final class ChewingBridge: ObservableObject {
         chewing_set_candPerPage(ctx, Int32(candidatesPerPage))
         chewing_set_spaceAsSelection(ctx, spaceAsSelection ? 1 : 0)
         chewing_set_escCleanAllBuf(ctx, escClearAll ? 1 : 0)
-        chewing_set_autoLearn(ctx, autoLearn ? 0 : 1) // 0=enabled, 1=disabled (inverted)
+        chewing_set_autoLearn(ctx, autoLearn ? 0 : 1)
         log("Preferences applied: shift=\(shiftBehavior), capsLock=\(capsLockBehavior), cand/page=\(candidatesPerPage)")
     }
 
-    /// Record a mode switch to track segment ordering.
-    private func recordModeSwitch(fromEnglish: Bool) {
-        guard let ctx = ctx else { return }
-        if fromEnglish {
-            // Switching FROM English to Chinese — save English segment
-            if !inlineEnglishBuffer.isEmpty {
-                mixedSegments.append(.english(inlineEnglishBuffer))
-                inlineEnglishBuffer = ""
-            }
-        } else {
-            // Switching FROM Chinese to English — snapshot Chinese buffer
-            if chewing_buffer_Len(ctx) > 0,
-               let bufStr = chewing_buffer_String(ctx) {
-                let snapshot = String(cString: bufStr)
-                chewing_free(bufStr)
-                mixedSegments.append(.chinese(snapshot))
-                chineseSnapshotBeforeEnglish = snapshot
-            }
-        }
-    }
-
-    // MARK: - Helpers
-
     private func findProjectRoot() -> String {
-        // Walk up from executable to find project root
         var url = URL(fileURLWithPath: #filePath)
         for _ in 0..<10 {
             url = url.deletingLastPathComponent()
@@ -497,17 +415,14 @@ final class ChewingBridge: ObservableObject {
                 return url.path
             }
         }
-        // Fallback: assume we're somewhere in the project
         return FileManager.default.currentDirectoryPath
     }
 }
 
 // MARK: - TypingMode Definition (Swift side)
 
-/// Mirrors the Rust TypingMode — bundles layout + conversion engine.
-/// KB type values match the C enum in chewing.h.
 enum TypingModeSwift: String, CaseIterable, Identifiable {
-    case qBopomofo          // QBopomofo 預設模式（所有自訂調校的主要模式）
+    case qBopomofo
     case standardBopomofo
     case fuzzyBopomofo
     case hsuBopomofo
@@ -529,28 +444,25 @@ enum TypingModeSwift: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Maps to KB enum in chewing.h (KB_DEFAULT=0, KB_HSU=1, etc.)
     var kbType: Int32 {
         switch self {
-        case .qBopomofo: return 0         // KB_DEFAULT（標準鍵盤 + 自訂詞頻）
-        case .standardBopomofo: return 0  // KB_DEFAULT
-        case .fuzzyBopomofo: return 0     // KB_DEFAULT (layout same, engine differs)
-        case .hsuBopomofo: return 1       // KB_HSU
-        case .ibmBopomofo: return 2       // KB_IBM
-        case .et26Bopomofo: return 5      // KB_ET26
-        case .hanyuPinyin: return 9       // KB_HANYU_PINYIN
+        case .qBopomofo: return 0
+        case .standardBopomofo: return 0
+        case .fuzzyBopomofo: return 0
+        case .hsuBopomofo: return 1
+        case .ibmBopomofo: return 2
+        case .et26Bopomofo: return 5
+        case .hanyuPinyin: return 9
         }
     }
 
-    /// Maps to conversion engine constants in chewing.h
     var conversionEngine: Int32 {
         switch self {
-        case .fuzzyBopomofo: return 2  // FUZZY_CHEWING_CONVERSION_ENGINE
-        default: return 1              // CHEWING_CONVERSION_ENGINE
+        case .fuzzyBopomofo: return 2
+        default: return 1
         }
     }
 
-    /// Default Shift behavior for this mode
     var defaultShiftBehavior: ShiftBehaviorSwift {
         switch self {
         case .qBopomofo: return .smartToggle
@@ -558,7 +470,6 @@ enum TypingModeSwift: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Default CapsLock behavior for this mode
     var defaultCapsLockBehavior: CapsLockBehaviorSwift {
         return .none
     }
@@ -580,12 +491,6 @@ enum ShiftBehaviorSwift: String, CaseIterable, Identifiable {
         case .toggleOnly: return "僅切換中/英"
         }
     }
-}
-
-/// A segment of text in the mixed composing buffer, preserving insertion order.
-enum MixedSegment {
-    case chinese(String)
-    case english(String)
 }
 
 enum CapsLockBehaviorSwift: String, CaseIterable, Identifiable {
