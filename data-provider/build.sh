@@ -41,7 +41,7 @@ echo "[2/3] Building word.dat from word.csv..."
 echo ""
 
 # Build tsi.dat (phrase dictionary)
-echo "[3/3] Building tsi.dat from tsi.csv..."
+echo "[3/4] Building tsi.dat from tsi.csv..."
 "$CLI" init-database \
   --db-type trie \
   --csv \
@@ -50,6 +50,13 @@ echo "[3/3] Building tsi.dat from tsi.csv..."
   "$OUTPUT_DIR/tsi.dat"
 
 echo ""
+
+# Copy symbol and abbreviation tables (raw text, no compilation needed)
+echo "[4/4] Copying symbols.dat and swkb.dat..."
+cp "$DATA_DIR/symbols.dat" "$OUTPUT_DIR/symbols.dat"
+cp "$DATA_DIR/swkb.dat" "$OUTPUT_DIR/swkb.dat"
+
+echo ""
 echo "=== Done ==="
 echo "Output files:"
-ls -lh "$OUTPUT_DIR"/*.dat
+ls -lh "$OUTPUT_DIR"/*
