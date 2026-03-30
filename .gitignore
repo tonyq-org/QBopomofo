@@ -12,3 +12,4 @@ target/
 .DS_Store
 Thumbs.db
 mac/.build/
+mac/TestApp/.build/
