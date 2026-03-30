@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh_TW</string>
+	<key>CFBundleDisplayName</key>
+	<string>QBopomofo</string>
+	<key>CFBundleExecutable</key>
+	<string>QBopomofo</string>
+	<key>CFBundleIdentifier</key>
+	<string>org.qbopomofo.inputmethod.QBopomofo</string>
+	<key>CFBundleName</key>
+	<string>QBopomofo</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>LSBackgroundOnly</key>
+	<true/>
+	<key>InputMethodConnectionName</key>
+	<string>QBopomofo_Connection</string>
+	<key>InputMethodServerControllerClass</key>
+	<string>QBopomofoInputController</string>
+	<key>TISInputSourceID</key>
+	<string>org.qbopomofo.inputmethod.QBopomofo</string>
+	<key>TICapsLockLanguageSwitchCapable</key>
+	<true/>
+	<key>ComponentInputModeDict</key>
+	<dict>
+		<key>tsInputModeListKey</key>
+		<dict>
+			<key>org.qbopomofo.inputmethod.QBopomofo.Bopomofo</key>
+			<dict>
+				<key>TISIntendedLanguage</key>
+				<string>zh-Hant</string>
+				<key>tsInputModeScriptKey</key>
+				<string>smUnicodeScript</string>
+				<key>tsInputModeIsVisibleKey</key>
+				<true/>
+				<key>tsInputModeMenuIconFileKey</key>
+				<string>QBopomofo</string>
+				<key>tsInputModeAlternateMenuIconFileKey</key>
+				<string>QBopomofo</string>
+				<key>tsInputModePrimaryInScriptKey</key>
+				<true/>
+				<key>tsInputModeDefaultStateKey</key>
+				<true/>
+			</dict>
+		</dict>
+		<key>tsVisibleInputModeOrderedArrayKey</key>
+		<array>
+			<string>org.qbopomofo.inputmethod.QBopomofo.Bopomofo</string>
+		</array>
+	</dict>
+</dict>
+</plist>

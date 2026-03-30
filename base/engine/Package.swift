@@ -21,6 +21,10 @@ let package = Package(
         .unsafeFlags([
           "-L",
           ".build/plugins/outputs/libchewing/CChewing/destination/CargoBuild/cargo-target/release",
+          "-L",
+          ".build/plugins/outputs/engine/CChewing/destination/CargoBuild/cargo-target/release",
+          "-L",
+          "../../base/engine/target/release",
         ]),
         .linkedLibrary("chewing_capi"),
       ],

@@ -59,3 +59,25 @@ chewing/
 - macOS 平台層：Swift（透過 C API 呼叫引擎）
 - Windows 平台層：Rust（直接引用引擎 crate）
 - 資料處理工具：Rust
+
+## 開源授權合規（嚴格執行）
+
+**引入任何第三方程式碼或函式庫前，必須確認以下事項：**
+
+1. **授權相容性** — 本專案為 LGPL-2.1-or-later，引入的依賴必須與 LGPL-2.1 相容
+   - 相容：MIT, BSD-2, BSD-3, Apache-2.0, Zlib, ISC, Unlicense, LGPL-2.1+, MPL-2.0
+   - 需注意：GPL-2.0/3.0（會感染整個專案為 GPL）
+   - 不相容：AGPL, SSPL, 任何禁止商用的授權, proprietary
+2. **標註出處** — 在 NOTICE 檔中記錄每個引用的開源專案：名稱、版權、授權、來源 URL
+3. **保留原始授權** — 不得移除任何第三方程式碼中的版權聲明和授權文字
+4. **Cargo 依賴審查** — 新增 Rust crate 依賴前，用 `cargo license` 檢查其授權鏈
+5. **Swift 依賴審查** — 新增 Swift Package 前，確認其 LICENSE 檔案
+
+### 目前使用的開源專案
+
+| 專案 | 授權 | 用途 | 位置 |
+|------|------|------|------|
+| [libchewing](https://codeberg.org/chewing/libchewing) | LGPL-2.1 | 引擎核心（已 fork） | `base/engine/` |
+| [libchewing-data](https://codeberg.org/chewing/libchewing-data) | LGPL-2.1 | 字詞庫 CSV 資料 | `data-provider/chewing-data/` |
+
+**新增依賴時務必更新此表。**
