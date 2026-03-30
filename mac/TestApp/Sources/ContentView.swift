@@ -10,10 +10,11 @@ import SwiftUI
 /// 5. 送字到文字輸出區
 struct ContentView: View {
     @StateObject private var engine = ChewingBridge()
+    @State private var showSettings = false
 
     var body: some View {
         VStack(spacing: 0) {
-            // Title + Mode Picker
+            // Title + Mode Picker + Settings
             HStack {
                 Text("QBopomofo 模擬輸入框")
                     .font(.headline)
@@ -28,6 +29,15 @@ struct ContentView: View {
                 }
                 .pickerStyle(.menu)
                 .frame(width: 140)
+
+                // Settings button (simulates future status tray menu)
+                Button(action: { showSettings.toggle() }) {
+                    Image(systemName: "gearshape.fill")
+                }
+                .popover(isPresented: $showSettings, arrowEdge: .bottom) {
+                    ModeSettingsView(engine: engine)
+                }
+
                 Button("清除") { engine.reset() }
                     .keyboardShortcut("r", modifiers: .command)
             }
@@ -169,6 +179,114 @@ struct ContentView: View {
                 .frame(minWidth: 250)
             }
         }
+    }
+}
+
+// MARK: - Mode Settings Popover (simulates future status tray settings)
+
+struct ModeSettingsView: View {
+    @ObservedObject var engine: ChewingBridge
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Header
+            HStack {
+                Image(systemName: "gearshape.fill")
+                Text("\(engine.currentMode.displayName) 設定")
+                    .font(.headline)
+            }
+
+            Divider()
+
+            // Shift behavior
+            HStack {
+                Text("Shift 鍵")
+                    .frame(width: 80, alignment: .trailing)
+                Picker("", selection: Binding(
+                    get: { engine.shiftBehavior },
+                    set: {
+                        engine.shiftBehavior = $0
+                        engine.applyPreferences()
+                    }
+                )) {
+                    ForEach(ShiftBehaviorSwift.allCases) { behavior in
+                        Text(behavior.displayName).tag(behavior)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 160)
+            }
+
+            // CapsLock behavior
+            HStack {
+                Text("Caps Lock")
+                    .frame(width: 80, alignment: .trailing)
+                Picker("", selection: Binding(
+                    get: { engine.capsLockBehavior },
+                    set: {
+                        engine.capsLockBehavior = $0
+                        engine.applyPreferences()
+                    }
+                )) {
+                    ForEach(CapsLockBehaviorSwift.allCases) { behavior in
+                        Text(behavior.displayName).tag(behavior)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 160)
+            }
+
+            Divider()
+
+            // Candidates per page
+            HStack {
+                Text("每頁候選字")
+                    .frame(width: 80, alignment: .trailing)
+                Picker("", selection: Binding(
+                    get: { engine.candidatesPerPage },
+                    set: {
+                        engine.candidatesPerPage = $0
+                        engine.applyPreferences()
+                    }
+                )) {
+                    ForEach([5, 7, 9, 10], id: \.self) { n in
+                        Text("\(n)").tag(n)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 80)
+            }
+
+            // Toggles
+            Toggle("Space 選字", isOn: Binding(
+                get: { engine.spaceAsSelection },
+                set: {
+                    engine.spaceAsSelection = $0
+                    engine.applyPreferences()
+                }
+            ))
+            .padding(.leading, 84)
+
+            Toggle("Esc 清除全部", isOn: Binding(
+                get: { engine.escClearAll },
+                set: {
+                    engine.escClearAll = $0
+                    engine.applyPreferences()
+                }
+            ))
+            .padding(.leading, 84)
+
+            Toggle("自動學習詞彙", isOn: Binding(
+                get: { engine.autoLearn },
+                set: {
+                    engine.autoLearn = $0
+                    engine.applyPreferences()
+                }
+            ))
+            .padding(.leading, 84)
+        }
+        .padding()
+        .frame(width: 300)
     }
 }
 

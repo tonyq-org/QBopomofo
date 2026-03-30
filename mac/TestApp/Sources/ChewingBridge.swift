@@ -26,6 +26,13 @@ final class ChewingBridge: ObservableObject {
     @Published var debugLog: [String] = []
     /// Current typing mode
     @Published var currentMode: TypingModeSwift = .qBopomofo
+    /// Per-mode preferences
+    @Published var shiftBehavior: ShiftBehaviorSwift = .toggleChineseEnglish
+    @Published var capsLockBehavior: CapsLockBehaviorSwift = .none
+    @Published var candidatesPerPage: Int = 9
+    @Published var spaceAsSelection: Bool = true
+    @Published var escClearAll: Bool = true
+    @Published var autoLearn: Bool = true
 
     private var ctx: OpaquePointer?
 
@@ -242,8 +249,22 @@ final class ChewingBridge: ObservableObject {
         // Switch conversion engine
         chewing_config_set_int(ctx, "chewing.conversion_engine", mode.conversionEngine)
 
+        // Apply mode's default preferences
+        shiftBehavior = mode.defaultShiftBehavior
+        capsLockBehavior = mode.defaultCapsLockBehavior
+
         currentMode = mode
+        applyPreferences()
         log("Mode switched to: \(mode.displayName)")
+    }
+
+    func applyPreferences() {
+        guard let ctx = ctx else { return }
+        chewing_set_candPerPage(ctx, Int32(candidatesPerPage))
+        chewing_set_spaceAsSelection(ctx, spaceAsSelection ? 1 : 0)
+        chewing_set_escCleanAllBuf(ctx, escClearAll ? 1 : 0)
+        chewing_set_autoLearn(ctx, autoLearn ? 0 : 1) // 0=enabled, 1=disabled (inverted)
+        log("Preferences applied: shift=\(shiftBehavior), capsLock=\(capsLockBehavior), cand/page=\(candidatesPerPage)")
     }
 
     // MARK: - Helpers
@@ -307,6 +328,53 @@ enum TypingModeSwift: String, CaseIterable, Identifiable {
         switch self {
         case .fuzzyBopomofo: return 2  // FUZZY_CHEWING_CONVERSION_ENGINE
         default: return 1              // CHEWING_CONVERSION_ENGINE
+        }
+    }
+
+    /// Default Shift behavior for this mode
+    var defaultShiftBehavior: ShiftBehaviorSwift {
+        switch self {
+        case .qBopomofo: return .toggleChineseEnglish
+        default: return .none
+        }
+    }
+
+    /// Default CapsLock behavior for this mode
+    var defaultCapsLockBehavior: CapsLockBehaviorSwift {
+        return .none
+    }
+}
+
+// MARK: - Preference Enums
+
+enum ShiftBehaviorSwift: String, CaseIterable, Identifiable {
+    case none
+    case toggleChineseEnglish
+    case temporaryEnglish
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .none: return "不處理"
+        case .toggleChineseEnglish: return "切換中/英"
+        case .temporaryEnglish: return "暫時英文（按住）"
+        }
+    }
+}
+
+enum CapsLockBehaviorSwift: String, CaseIterable, Identifiable {
+    case none
+    case toggleChineseEnglish
+    case toggleFullHalfWidth
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .none: return "不處理"
+        case .toggleChineseEnglish: return "切換中/英"
+        case .toggleFullHalfWidth: return "切換全/半形"
         }
     }
 }
