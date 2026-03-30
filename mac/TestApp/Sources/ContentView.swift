@@ -65,11 +65,8 @@ struct ContentView: View {
                         Text("輸出文字")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Text(engine.committedText.isEmpty ? " " : engine.committedText)
-                            .font(.system(size: 18))
-                            .frame(maxWidth: .infinity, minHeight: 60, alignment: .topLeading)
-                            .padding(8)
-                            .background(.background)
+                        AppKitTextView(text: $engine.committedText, isEditable: false, font: .systemFont(ofSize: 18))
+                            .frame(maxWidth: .infinity, minHeight: 60, maxHeight: 120)
                             .border(.separator)
                     }
 
@@ -94,6 +91,12 @@ struct ContentView: View {
                         .padding(8)
                         .background(Color.blue.opacity(0.05))
                         .border(Color.blue.opacity(0.3))
+                        .onChange(of: engine.preEditDisplay) {
+                            guard engine.lastKeyTime > 0 else { return }
+                            let elapsed = (CFAbsoluteTimeGetCurrent() - engine.lastKeyTime) * 1000
+                            engine.lastKeyTime = 0
+                            engine.logRender(elapsed)
+                        }
                     }
 
                     // Candidates
@@ -143,7 +146,7 @@ struct ContentView: View {
                 .padding()
                 .frame(minWidth: 350)
 
-                // Right: Debug log
+                // Right: Debug log (AppKit NSTextView for performance)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text("引擎日誌")
@@ -151,30 +154,25 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                         Spacer()
                         Button("複製日誌") {
-                            let text = engine.debugLog.joined(separator: "\n")
                             NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(text, forType: .string)
+                            NSPasteboard.general.setString(engine.debugLog, forType: .string)
                         }
                         .font(.caption)
                         Button("清除日誌") {
-                            engine.debugLog.removeAll()
+                            engine.clearLog()
                         }
                         .font(.caption)
                     }
                     .padding(.top, 12)
                     .padding(.horizontal, 8)
 
-                    let logText = engine.debugLog.joined(separator: "\n")
-                    ScrollView {
-                        Text(logText)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(8)
-                    }
-                    .defaultScrollAnchor(.bottom)
-                    .background(.background)
+                    AppKitTextView(
+                        text: $engine.debugLog,
+                        isEditable: false,
+                        font: .monospacedSystemFont(ofSize: 11, weight: .regular),
+                        textColor: .secondaryLabelColor,
+                        scrollToBottom: true
+                    )
                     .border(.separator)
                     .padding(.horizontal, 8)
                     .padding(.bottom, 12)
@@ -182,6 +180,50 @@ struct ContentView: View {
                 .frame(minWidth: 250)
             }
         }
+    }
+}
+
+// MARK: - AppKit NSTextView wrapper (high-performance text display)
+
+struct AppKitTextView: NSViewRepresentable {
+    @Binding var text: String
+    var isEditable: Bool = false
+    var font: NSFont = .systemFont(ofSize: 13)
+    var textColor: NSColor = .labelColor
+    var scrollToBottom: Bool = false
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSTextView.scrollableTextView()
+        let textView = scrollView.documentView as! NSTextView
+        textView.isEditable = isEditable
+        textView.isSelectable = true
+        textView.font = font
+        textView.textColor = textColor
+        textView.backgroundColor = .textBackgroundColor
+        textView.textContainerInset = NSSize(width: 4, height: 4)
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        context.coordinator.textView = textView
+        context.coordinator.scrollView = scrollView
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? NSTextView else { return }
+        if textView.string != text {
+            textView.string = text
+            if scrollToBottom {
+                textView.scrollToEndOfDocument(nil)
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    class Coordinator {
+        weak var textView: NSTextView?
+        weak var scrollView: NSScrollView?
     }
 }
 

@@ -78,6 +78,14 @@ pub extern "C" fn qb_composing_is_shift_held(session: *const QBComposingSession)
     if s.inner.is_shift_held() { 1 } else { 0 }
 }
 
+/// Mark that a key was typed while Shift was held (prevents mode toggle on release).
+#[unsafe(no_mangle)]
+pub extern "C" fn qb_composing_mark_shift_used(session: *mut QBComposingSession) {
+    if session.is_null() { return; }
+    let s = unsafe { &mut *session };
+    s.inner.mark_shift_used();
+}
+
 /// Type an English character.
 /// `chinese_buffer`: current chewing buffer content (UTF-8). Pass NULL or "" if empty.
 /// Returns 1 if caller should directly commit this character (no Chinese context),

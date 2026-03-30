@@ -12,6 +12,7 @@ class QBopomofoInputController: IMKInputController {
 
     private var chewingContext: OpaquePointer?
     private var composingSession: OpaquePointer?
+    private var isAutoFlushing: Bool = false
     private var currentClient: IMKTextInput?
 
     // MARK: - Lifecycle
@@ -96,9 +97,9 @@ class QBopomofoInputController: IMKInputController {
         // Pass through Command/Control
         if modifiers.contains(.command) || modifiers.contains(.control) { return false }
 
-        // Shift held + typing → English
+        // Shift held + typing → English (letters only; punctuation falls through to engine)
         if shift && qb_composing_is_shift_held(session) != 0 {
-            if let ch = chars.first, ch.isASCII {
+            if let ch = chars.first, ch.isASCII, ch.isLetter {
                 let chinBuf = getChewingBuffer(ctx)
                 let directCommit = chinBuf.withCString { cStr in
                     qb_composing_type_english(session, UInt8(ch.asciiValue ?? 0), cStr)
@@ -110,6 +111,8 @@ class QBopomofoInputController: IMKInputController {
                 }
                 return true
             }
+            // Non-letter key while Shift held: mark used so release won't toggle mode
+            qb_composing_mark_shift_used(session)
         }
 
         // English mode
@@ -218,6 +221,14 @@ class QBopomofoInputController: IMKInputController {
                 }
                 return chinese + bopomofo
             }
+        }
+
+        // Auto-flush: composing display > 20 chars → commit all
+        if !isAutoFlushing && display.count > 20 {
+            isAutoFlushing = true
+            commitAll(ctx: ctx, session: session, client: client)
+            isAutoFlushing = false
+            return
         }
 
         if !display.isEmpty {

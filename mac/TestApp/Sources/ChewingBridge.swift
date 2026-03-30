@@ -8,6 +8,9 @@ import CChewing
 @MainActor
 final class ChewingBridge: ObservableObject {
 
+    // MARK: - Timing
+    var lastKeyTime: CFAbsoluteTime = 0
+
     // MARK: - Published state (drives SwiftUI updates)
 
     @Published var bopomofoReading: String = ""
@@ -18,7 +21,11 @@ final class ChewingBridge: ObservableObject {
     @Published var showCandidates: Bool = false
     @Published var committedText: String = ""
     @Published var isEnglishMode: Bool = false
-    @Published var debugLog: [String] = []
+    @Published var debugLog: String = ""
+    private var debugLogPending: String = ""
+    private var debugLogLineCount: Int = 0
+    private var debugLogFlushScheduled: Bool = false
+    private var isAutoFlushing: Bool = false
     @Published var currentMode: TypingModeSwift = .qBopomofo
     @Published var shiftBehavior: ShiftBehaviorSwift = .smartToggle
     @Published var capsLockBehavior: CapsLockBehaviorSwift = .none
@@ -116,11 +123,22 @@ final class ChewingBridge: ObservableObject {
     // MARK: - Key Handling
 
     func handleKey(keyCode: UInt16, characters: String, shift: Bool = false) -> Bool {
+        lastKeyTime = CFAbsoluteTimeGetCurrent()
+        defer {
+            let elapsed = (CFAbsoluteTimeGetCurrent() - lastKeyTime) * 1000
+            log("⏱ engine \(String(format: "%.2f", elapsed))ms")
+        }
         guard let ctx = ctx, let session = session else { return false }
 
-        // Shift held + typing → English via Rust session
+        let rustEnglish = qb_composing_is_english(session) != 0
+        let hasMixed = qb_composing_has_mixed_content(session) != 0
+        if rustEnglish || hasMixed {
+            log("DEBUG mode=\(rustEnglish ? "EN" : "CH") mixed=\(hasMixed) swiftEN=\(isEnglishMode)")
+        }
+
+        // Shift held + typing → English (letters only; punctuation falls through to engine)
         if shift && qb_composing_is_shift_held(session) != 0 {
-            if let ch = characters.first, ch.isASCII {
+            if let ch = characters.first, ch.isASCII, ch.isLetter {
                 let chinBuf = getChewingBufferString()
                 let directCommit = chinBuf.withCString { cStr in
                     qb_composing_type_english(session, UInt8(ch.asciiValue ?? 0), cStr)
@@ -135,6 +153,8 @@ final class ChewingBridge: ObservableObject {
                 updateState()
                 return true
             }
+            // Non-letter key while Shift held: mark used so release won't toggle mode
+            qb_composing_mark_shift_used(session)
         }
 
         // English mode — type into session
@@ -316,7 +336,7 @@ final class ChewingBridge: ObservableObject {
         }
 
         committedText += result
-        isEnglishMode = false
+        isEnglishMode = qb_composing_is_english(session) != 0
         log("Commit all: \(result)")
         updateState()
     }
@@ -327,37 +347,43 @@ final class ChewingBridge: ObservableObject {
         guard let ctx = ctx, let session = session else { return }
 
         // Bopomofo reading
+        let newBopo: String
         if chewing_bopomofo_Check(ctx) != 0,
            let bopoStr = chewing_bopomofo_String(ctx) {
-            bopomofoReading = String(cString: bopoStr)
+            newBopo = String(cString: bopoStr)
             chewing_free(bopoStr)
         } else {
-            bopomofoReading = ""
+            newBopo = ""
         }
+        if bopomofoReading != newBopo { bopomofoReading = newBopo }
 
-        // Composing buffer
+        // Composing buffer (internal, not directly displayed)
+        let newBuf: String
         if chewing_buffer_Len(ctx) > 0,
            let bufStr = chewing_buffer_String(ctx) {
-            composingBuffer = String(cString: bufStr)
+            newBuf = String(cString: bufStr)
             chewing_free(bufStr)
         } else {
-            composingBuffer = ""
+            newBuf = ""
         }
+        if composingBuffer != newBuf { composingBuffer = newBuf }
 
         // Build full display via Rust session (handles mixed segment ordering)
-        preEditDisplay = composingBuffer.withCString { chinBuf in
-            bopomofoReading.withCString { bopoBuf in
+        let newDisplay = newBuf.withCString { chinBuf in
+            newBopo.withCString { bopoBuf in
                 if let displayPtr = qb_composing_build_display(session, chinBuf, bopoBuf) {
                     let s = String(cString: displayPtr)
                     chewing_free(displayPtr)
                     return s
                 }
-                return composingBuffer + bopomofoReading
+                return newBuf + newBopo
             }
         }
+        if preEditDisplay != newDisplay { preEditDisplay = newDisplay }
 
         // English mode sync
-        isEnglishMode = qb_composing_is_english(session) != 0
+        let newEnglish = qb_composing_is_english(session) != 0
+        if isEnglishMode != newEnglish { isEnglishMode = newEnglish }
 
         // Candidates
         let totalPage = chewing_cand_TotalPage(ctx)
@@ -370,13 +396,29 @@ final class ChewingBridge: ObservableObject {
                     chewing_free(candStr)
                 }
             }
-            candidates = candList
-            showCandidates = !candList.isEmpty
+            if candidates != candList { candidates = candList }
+            if !showCandidates { showCandidates = true }
             let currentPage = chewing_cand_CurrentPage(ctx)
             log("Candidates page \(currentPage + 1)/\(totalPage): \(candList.prefix(9).joined(separator: " "))")
         } else {
-            candidates = []
-            showCandidates = false
+            if !candidates.isEmpty { candidates = [] }
+            if showCandidates { showCandidates = false }
+        }
+
+        // Auto-flush: composing display > 20 chars → commit
+        if !isAutoFlushing && newDisplay.count > 20 {
+            isAutoFlushing = true
+            let hasChinese = !newBuf.isEmpty
+            if !hasChinese {
+                // Pure English — flush all
+                commitAll()
+                log("Auto-flush (純英文, \(newDisplay.count) chars)")
+            } else {
+                // Mixed — flush all
+                commitAll()
+                log("Auto-flush (中英混合, \(newDisplay.count) chars)")
+            }
+            isAutoFlushing = false
         }
     }
 
@@ -393,11 +435,51 @@ final class ChewingBridge: ObservableObject {
         return ""
     }
 
+    func clearLog() {
+        debugLog = ""
+        debugLogPending = ""
+        debugLogLineCount = 0
+    }
+
+    func logRender(_ elapsedMs: Double) {
+        log("⏱ render \(String(format: "%.2f", elapsedMs))ms")
+    }
+
     private func log(_ message: String) {
         let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-        debugLog.append("[\(timestamp)] \(message)")
-        if debugLog.count > 100 {
-            debugLog.removeFirst(debugLog.count - 100)
+        let line = "[\(timestamp)] \(message)"
+        if debugLogPending.isEmpty {
+            debugLogPending = line
+        } else {
+            debugLogPending += "\n" + line
+        }
+        debugLogLineCount += 1
+        // Flush on next run loop — batches multiple log() calls into one @Published update
+        if !debugLogFlushScheduled {
+            debugLogFlushScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                self?.flushLog()
+            }
+        }
+    }
+
+    private func flushLog() {
+        debugLogFlushScheduled = false
+        guard !debugLogPending.isEmpty else { return }
+        if debugLog.isEmpty {
+            debugLog = debugLogPending
+        } else {
+            debugLog += "\n" + debugLogPending
+        }
+        debugLogPending = ""
+        // Trim to 200 lines
+        while debugLogLineCount > 200 {
+            if let idx = debugLog.firstIndex(of: "\n") {
+                debugLog = String(debugLog[debugLog.index(after: idx)...])
+                debugLogLineCount -= 1
+            } else {
+                break
+            }
         }
     }
 

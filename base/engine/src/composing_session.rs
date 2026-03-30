@@ -70,6 +70,13 @@ impl ComposingSession {
         !self.segments.is_empty() || !self.english_buffer.is_empty()
     }
 
+    /// Mark that a key was typed while Shift was held (prevents toggle on release).
+    pub fn mark_shift_used(&mut self) {
+        if self.shift_held {
+            self.shift_typed_while_held = true;
+        }
+    }
+
     // MARK: - Shift handling
 
     /// Handle Shift key press/release. Returns true if mode changed.
@@ -251,8 +258,10 @@ impl ComposingSession {
         // Remaining English
         result.push_str(&self.english_buffer);
 
-        // Reset
+        // Reset segments/buffers but preserve mode
+        let was_english = self.is_english;
         self.clear();
+        self.is_english = was_english;
 
         result
     }

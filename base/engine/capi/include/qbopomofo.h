@@ -45,6 +45,9 @@ int qb_composing_handle_shift(QBComposingSession *session, int is_down, const ch
 /** Check if Shift is currently held down. */
 int qb_composing_is_shift_held(const QBComposingSession *session);
 
+/** Mark that a key was typed while Shift was held (prevents mode toggle on release). */
+void qb_composing_mark_shift_used(QBComposingSession *session);
+
 /**
  * Type an English character.
  * @param chinese_buffer current chewing buffer content (UTF-8). NULL or "" if empty.
