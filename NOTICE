@@ -1,0 +1,17 @@
+This project contains code and data derived from the following open-source projects:
+
+libchewing - The intelligent phonetic input method library
+  Copyright (c) 2004-2025 libchewing Core Team
+  License: LGPL-2.1-or-later
+  Source: https://codeberg.org/chewing/libchewing
+  Location in this repo: base/engine/
+
+libchewing-data - Dictionary and frequency data
+  Copyright (c) 2004-2025 libchewing Core Team
+  License: LGPL-2.1-or-later
+  Source: https://codeberg.org/chewing/libchewing-data
+  Location in this repo: data-provider/chewing-data/
+
+Modifications and additional code in this repository (QBopomofo) are
+Copyright (c) 2026 TonyQ Wang
+License: LGPL-2.1-or-later

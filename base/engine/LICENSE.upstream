@@ -1,0 +1,14 @@
+This directory contains code originally from:
+
+  libchewing - The intelligent phonetic input method library
+  https://codeberg.org/chewing/libchewing
+
+  Copyright (c) 2004-2025 libchewing Core Team
+  Licensed under LGPL-2.1-or-later
+
+The original LGPL-2.1 license text applies to all files in this directory
+that originated from libchewing. See the root LICENSE file for the full
+LGPL-2.1 license text.
+
+This code has been forked for independent development and is no longer
+tracking the upstream repository.

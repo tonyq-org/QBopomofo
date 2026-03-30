@@ -1,0 +1,13 @@
+# Build output
+data-provider/output/
+target/
+
+# IDE
+.idea/
+.vscode/
+*.xcworkspace/
+*.xcuserdata/
+
+# OS
+.DS_Store
+Thumbs.db
