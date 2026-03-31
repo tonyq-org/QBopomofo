@@ -33,7 +33,6 @@ class QBopomofoInputController: IMKInputController {
     private var composingSession: OpaquePointer?
     private var isAutoFlushing: Bool = false
     private var currentClient: IMKTextInput?
-    private var selectedCandidateIndex: Int = 0
     nonisolated(unsafe) private static var candidateWindow: IMKCandidates?
 
     // MARK: - Lifecycle
@@ -43,7 +42,10 @@ class QBopomofoInputController: IMKInputController {
         if QBopomofoInputController.candidateWindow == nil {
             // IMKCandidates init requires IMKServer; safe because we're always on main thread
             nonisolated(unsafe) let srv = server!
-            QBopomofoInputController.candidateWindow = IMKCandidates(server: srv, panelType: kIMKSingleColumnScrollingCandidatePanel)
+            if let candWin = IMKCandidates(server: srv, panelType: kIMKSingleColumnScrollingCandidatePanel) {
+                candWin.setAttributes([IMKCandidatesSendServerKeyEventFirst: NSNumber(value: true)])
+                QBopomofoInputController.candidateWindow = candWin
+            }
         }
         initializeEngine()
     }
@@ -267,41 +269,31 @@ class QBopomofoInputController: IMKInputController {
             return true
         }
 
-        // Candidate mode — intercept navigation keys
+        // Candidate mode — let IMKCandidates handle Up/Down/Enter navigation,
+        // we only intercept Left/Right (paging), Esc, and number keys.
         if inCandidateMode(ctx) {
             switch keyCode {
-            case 125: // Down — next candidate
-                let candCount = getCandidateCount(ctx)
-                selectedCandidateIndex = min(selectedCandidateIndex + 1, candCount - 1)
-                dbg("cand ↓ → \(selectedCandidateIndex)")
-                highlightCandidate(at: selectedCandidateIndex)
-                return true
-            case 126: // Up — previous candidate
-                selectedCandidateIndex = max(selectedCandidateIndex - 1, 0)
-                dbg("cand ↑ → \(selectedCandidateIndex)")
-                highlightCandidate(at: selectedCandidateIndex)
-                return true
+            case 125, 126: // Down/Up — let IMKCandidates handle highlight navigation
+                dbg("cand \(keyCode == 125 ? "↓" : "↑") → pass to IMKCandidates")
+                return false
+            case 36: // Enter — let IMKCandidates handle selection (calls candidateSelected)
+                dbg("cand enter → pass to IMKCandidates")
+                return false
             case 124: // Right — next page
                 chewing_handle_Right(ctx)
-                selectedCandidateIndex = 0
                 dbg("cand page → (page \(chewing_cand_CurrentPage(ctx)+1)/\(chewing_cand_TotalPage(ctx)))")
                 updateClientDisplay(ctx: ctx, session: session, client: client)
                 return true
             case 123: // Left — previous page
                 chewing_handle_Left(ctx)
-                selectedCandidateIndex = 0
                 dbg("cand page ← (page \(chewing_cand_CurrentPage(ctx)+1)/\(chewing_cand_TotalPage(ctx)))")
                 updateClientDisplay(ctx: ctx, session: session, client: client)
                 return true
-            case 36, 49: // Enter or Space — select current candidate
-                chewing_cand_choose_by_index(ctx, Int32(selectedCandidateIndex))
-                dbg("cand select: \(selectedCandidateIndex)")
-                selectedCandidateIndex = 0
-                updateClientDisplay(ctx: ctx, session: session, client: client)
-                return true
+            case 49: // Space — let IMKCandidates handle (next candidate or confirm)
+                dbg("cand space → pass to IMKCandidates")
+                return false
             case 53: // Escape — close candidates
                 chewing_cand_close(ctx)
-                selectedCandidateIndex = 0
                 dbg("cand cancel")
                 updateClientDisplay(ctx: ctx, session: session, client: client)
                 return true
@@ -311,7 +303,6 @@ class QBopomofoInputController: IMKInputController {
                     let idx = Int(ch.asciiValue! - Character("1").asciiValue!)
                     chewing_cand_choose_by_index(ctx, Int32(idx))
                     dbg("cand select #\(idx + 1)")
-                    selectedCandidateIndex = 0
                     updateClientDisplay(ctx: ctx, session: session, client: client)
                     return true
                 }
@@ -421,8 +412,6 @@ class QBopomofoInputController: IMKInputController {
             if inCandMode {
                 candWin.update()
                 candWin.show(kIMKLocateCandidatesBelowHint)
-                // Highlight the current selection after update
-                highlightCandidate(at: selectedCandidateIndex)
             } else {
                 if candWin.isVisible() { candWin.hide() }
             }
@@ -508,7 +497,6 @@ class QBopomofoInputController: IMKInputController {
                 idx += 1
             }
         }
-        selectedCandidateIndex = 0
         updateClientDisplay(ctx: ctx, session: session, client: client)
     }
 
@@ -525,15 +513,6 @@ class QBopomofoInputController: IMKInputController {
 
     private func inCandidateMode(_ ctx: OpaquePointer) -> Bool {
         chewing_cand_CheckDone(ctx) == 0 && chewing_cand_TotalPage(ctx) > 0
-    }
-
-    private func highlightCandidate(at lineNumber: Int) {
-        guard let candWin = QBopomofoInputController.candidateWindow else { return }
-        let identifier = candWin.candidateIdentifier(atLineNumber: lineNumber)
-        if identifier != NSNotFound {
-            candWin.selectCandidate(withIdentifier: identifier)
-            dbg("highlight line=\(lineNumber) id=\(identifier)")
-        }
     }
 
     private func getCandidateCount(_ ctx: OpaquePointer) -> Int {
