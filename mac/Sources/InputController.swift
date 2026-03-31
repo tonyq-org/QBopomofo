@@ -342,7 +342,9 @@ class QBopomofoInputController: IMKInputController {
 
     private func processChewingKey(ctx: OpaquePointer, keyCode: UInt16, chars: String) -> Bool {
         switch keyCode {
-        case 36: chewing_handle_Enter(ctx); return true
+        case 36:
+            if chewing_buffer_Len(ctx) == 0 && chewing_bopomofo_Check(ctx) == 0 { return false }
+            chewing_handle_Enter(ctx); return true
         case 51:
             if chewing_buffer_Len(ctx) == 0 && chewing_bopomofo_Check(ctx) == 0 { return false }
             chewing_handle_Backspace(ctx); return true
