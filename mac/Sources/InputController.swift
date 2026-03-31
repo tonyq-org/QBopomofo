@@ -21,6 +21,26 @@ private func dbg(_ msg: String) {
     }
 }
 
+// Correction log: records candidate corrections for phrase tuning
+nonisolated(unsafe) private var correctionLogHandle: FileHandle? = {
+    guard kDebugMode else { return nil }
+    let path = "/tmp/qbopomofo-corrections.log"
+    if !FileManager.default.fileExists(atPath: path) {
+        FileManager.default.createFile(atPath: path, contents: nil)
+    }
+    return FileHandle(forWritingAtPath: path)
+}()
+
+private func logCorrection(_ entry: String) {
+    guard kDebugMode, let handle = correctionLogHandle else { return }
+    let ts = DateFormatter.localizedString(from: Date(), dateStyle: .short, timeStyle: .medium)
+    let line = "[\(ts)] \(entry)\n"
+    if let data = line.data(using: .utf8) {
+        handle.seekToEndOfFile()
+        handle.write(data)
+    }
+}
+
 /// QBopomofo 的核心輸入控制器
 /// 負責處理按鍵事件、與 libchewing 引擎互動、管理輸入狀態
 /// 組字邏輯（Shift SmartToggle、中英混排）委託給 Rust ComposingSession (qb_composing_*)
@@ -33,20 +53,13 @@ class QBopomofoInputController: IMKInputController {
     private var composingSession: OpaquePointer?
     private var isAutoFlushing: Bool = false
     private var currentClient: IMKTextInput?
-    nonisolated(unsafe) private static var candidateWindow: IMKCandidates?
+
+    private var candidatePanel: CandidatePanel { CandidatePanel.shared }
 
     // MARK: - Lifecycle
 
     override init!(server: IMKServer!, delegate: Any!, client inputClient: Any!) {
         super.init(server: server, delegate: delegate, client: inputClient)
-        if QBopomofoInputController.candidateWindow == nil {
-            // IMKCandidates init requires IMKServer; safe because we're always on main thread
-            nonisolated(unsafe) let srv = server!
-            if let candWin = IMKCandidates(server: srv, panelType: kIMKSingleColumnScrollingCandidatePanel) {
-                candWin.setAttributes([IMKCandidatesSendServerKeyEventFirst: NSNumber(value: true)])
-                QBopomofoInputController.candidateWindow = candWin
-            }
-        }
         initializeEngine()
     }
 
@@ -175,13 +188,14 @@ class QBopomofoInputController: IMKInputController {
         let modifiers = event.modifierFlags
         let shift = modifiers.contains(.shift)
 
-        dbg("key=\(keyCode) chars=\(chars)")
+        let isCandMode = inCandidateMode(ctx)
+        dbg("key=\(keyCode) chars=\(chars) candMode=\(isCandMode)")
 
         // Pass through Command/Control and numpad keys
         if modifiers.contains(.command) || modifiers.contains(.control) { return false }
-        // Numpad digit keys (keyCodes 82-92) → pass through directly (not as bopomofo)
+        // Numpad digit keys (keyCodes 82-92) → pass through unless in candidate mode
         let numpadDigits: Set<UInt16> = [82,83,84,85,86,87,88,89,91,92] // 0-9 on numpad
-        if numpadDigits.contains(keyCode) { return false }
+        if numpadDigits.contains(keyCode) && !isCandMode { return false }
 
         // Shift held + typing → English (letters only; punctuation falls through to engine)
         if shift && qb_composing_is_shift_held(session) != 0 {
@@ -269,16 +283,20 @@ class QBopomofoInputController: IMKInputController {
             return true
         }
 
-        // Candidate mode — let IMKCandidates handle Up/Down/Enter navigation,
-        // we only intercept Left/Right (paging), Esc, and number keys.
-        if inCandidateMode(ctx) {
+        // Candidate mode — custom CandidatePanel handles all navigation
+        if isCandMode {
             switch keyCode {
-            case 125, 126: // Down/Up — let IMKCandidates handle highlight navigation
-                dbg("cand \(keyCode == 125 ? "↓" : "↑") → pass to IMKCandidates")
-                return false
-            case 36: // Enter — let IMKCandidates handle selection (calls candidateSelected)
-                dbg("cand enter → pass to IMKCandidates")
-                return false
+            case 125: // Down — next candidate
+                candidatePanel.highlightNext()
+                dbg("cand ↓ → idx=\(candidatePanel.highlightedIndex)")
+                return true
+            case 126: // Up — previous candidate
+                candidatePanel.highlightPrevious()
+                dbg("cand ↑ → idx=\(candidatePanel.highlightedIndex)")
+                return true
+            case 36: // Enter — select current candidate
+                selectCandidateAndLog(ctx: ctx, session: session, client: client, index: candidatePanel.highlightedIndex, source: "enter")
+                return true
             case 124: // Right — next page
                 chewing_handle_Right(ctx)
                 dbg("cand page → (page \(chewing_cand_CurrentPage(ctx)+1)/\(chewing_cand_TotalPage(ctx)))")
@@ -289,11 +307,12 @@ class QBopomofoInputController: IMKInputController {
                 dbg("cand page ← (page \(chewing_cand_CurrentPage(ctx)+1)/\(chewing_cand_TotalPage(ctx)))")
                 updateClientDisplay(ctx: ctx, session: session, client: client)
                 return true
-            case 49: // Space — let IMKCandidates handle (next candidate or confirm)
-                dbg("cand space → pass to IMKCandidates")
-                return false
+            case 49: // Space — select current candidate
+                selectCandidateAndLog(ctx: ctx, session: session, client: client, index: candidatePanel.highlightedIndex, source: "space")
+                return true
             case 53: // Escape — close candidates
                 chewing_cand_close(ctx)
+                candidatePanel.hidePanel()
                 dbg("cand cancel")
                 updateClientDisplay(ctx: ctx, session: session, client: client)
                 return true
@@ -301,9 +320,7 @@ class QBopomofoInputController: IMKInputController {
                 // Number keys 1-9 select directly
                 if let ch = chars.first, ch >= "1" && ch <= "9" {
                     let idx = Int(ch.asciiValue! - Character("1").asciiValue!)
-                    chewing_cand_choose_by_index(ctx, Int32(idx))
-                    dbg("cand select #\(idx + 1)")
-                    updateClientDisplay(ctx: ctx, session: session, client: client)
+                    selectCandidateAndLog(ctx: ctx, session: session, client: client, index: idx, source: "#\(idx+1)")
                     return true
                 }
             }
@@ -407,22 +424,30 @@ class QBopomofoInputController: IMKInputController {
             )
         }
 
-        // Show/hide candidate window
-        if let candWin = QBopomofoInputController.candidateWindow {
-            if inCandMode {
-                candWin.update()
-                candWin.show(kIMKLocateCandidatesBelowHint)
-            } else {
-                if candWin.isVisible() { candWin.hide() }
-            }
+        // Show/hide candidate panel
+        if inCandMode {
+            let candList = getCandidateList(ctx)
+            let page = Int(chewing_cand_CurrentPage(ctx))
+            let totalPages = Int(chewing_cand_TotalPage(ctx))
+            // Only show candidates for current page
+            let perPage = Int(chewing_get_candPerPage(ctx))
+            let pageList = Array(candList.prefix(perPage))
+            candidatePanel.setCandidates(pageList, page: page, totalPages: totalPages)
+            dbg("candidatePanel count=\(pageList.count) page=\(page+1)/\(totalPages)")
+
+            // Position below cursor
+            let cursorPoint = getCursorPosition(client: client)
+            candidatePanel.show(at: cursorPoint)
+        } else {
+            if candidatePanel.isPanelVisible { candidatePanel.hidePanel() }
         }
     }
 
     // MARK: - Commit
 
     private func commitAll(ctx: OpaquePointer, session: OpaquePointer, client: IMKTextInput, source: String) {
-        // Hide candidate window
-        QBopomofoInputController.candidateWindow?.hide()
+        // Hide candidate panel
+        candidatePanel.hidePanel()
 
         var finalChinese = ""
         if chewing_buffer_Len(ctx) > 0 {
@@ -460,45 +485,6 @@ class QBopomofoInputController: IMKInputController {
         chewing_Reset(ctx)
     }
 
-    // MARK: - Candidates
-
-    override func candidates(_ sender: Any!) -> [Any]! {
-        guard let ctx = chewingContext else { return nil }
-        guard chewing_cand_TotalPage(ctx) > 0 else { return nil }
-        var candidates: [String] = []
-        chewing_cand_Enumerate(ctx)
-        while chewing_cand_hasNext(ctx) != 0 {
-            if let candStr = chewing_cand_String(ctx) {
-                candidates.append(String(cString: candStr))
-                chewing_free(candStr)
-            }
-        }
-        dbg("candidates() returned \(candidates.count) items")
-        return candidates
-    }
-
-    override func candidateSelected(_ candidateString: NSAttributedString!) {
-        guard let ctx = chewingContext, let session = composingSession else { return }
-        guard let client = currentClient else { return }
-        let selected = candidateString?.string ?? ""
-        dbg("candidateSelected: \(selected)")
-
-        // Find the index of the selected candidate and choose it
-        var idx: Int32 = 0
-        chewing_cand_Enumerate(ctx)
-        while chewing_cand_hasNext(ctx) != 0 {
-            if let candStr = chewing_cand_String(ctx) {
-                let cand = String(cString: candStr)
-                chewing_free(candStr)
-                if cand == selected {
-                    chewing_cand_choose_by_index(ctx, idx)
-                    break
-                }
-                idx += 1
-            }
-        }
-        updateClientDisplay(ctx: ctx, session: session, client: client)
-    }
 
     // MARK: - Helpers
 
@@ -515,16 +501,59 @@ class QBopomofoInputController: IMKInputController {
         chewing_cand_CheckDone(ctx) == 0 && chewing_cand_TotalPage(ctx) > 0
     }
 
-    private func getCandidateCount(_ ctx: OpaquePointer) -> Int {
-        var count = 0
+    private func getCandidateList(_ ctx: OpaquePointer) -> [String] {
+        var list: [String] = []
         chewing_cand_Enumerate(ctx)
         while chewing_cand_hasNext(ctx) != 0 {
             if let s = chewing_cand_String(ctx) {
+                list.append(String(cString: s))
                 chewing_free(s)
-                count += 1
             }
         }
-        return count
+        return list
+    }
+
+    private func getCursorPosition(client: IMKTextInput) -> NSPoint {
+        var lineRect = NSRect.zero
+        client.attributes(forCharacterIndex: 0, lineHeightRectangle: &lineRect)
+        // Return bottom-left of the line rect (candidate panel appears below)
+        return NSPoint(x: lineRect.origin.x, y: lineRect.origin.y)
+    }
+
+    /// Select a candidate and log the correction if the buffer changed
+    private func selectCandidateAndLog(ctx: OpaquePointer, session: OpaquePointer, client: IMKTextInput, index: Int, source: String) {
+        let bufferBefore = getChewingBuffer(ctx)
+        chewing_cand_choose_by_index(ctx, Int32(index))
+        let bufferAfter = getChewingBuffer(ctx)
+
+        dbg("cand \(source) select idx=\(index)")
+
+        if kDebugMode && bufferBefore != bufferAfter {
+            // Extract context: 3 chars around the change
+            let before = Array(bufferBefore)
+            let after = Array(bufferAfter)
+            // Find first differing position
+            var diffPos = 0
+            while diffPos < min(before.count, after.count) && before[diffPos] == after[diffPos] {
+                diffPos += 1
+            }
+            // Find last differing position from end
+            var diffEnd = 0
+            while diffEnd < min(before.count, after.count) - diffPos
+                    && before[before.count - 1 - diffEnd] == after[after.count - 1 - diffEnd] {
+                diffEnd += 1
+            }
+            let ctxStart = max(0, diffPos - 3)
+            let ctxEnd = min(before.count, before.count - diffEnd + 3)
+            let contextBefore = String(before[ctxStart..<ctxEnd])
+            let ctxEndAfter = min(after.count, after.count - diffEnd + 3)
+            let contextAfter = String(after[ctxStart..<ctxEndAfter])
+            let original = String(before[diffPos..<(before.count - diffEnd)])
+            let corrected = String(after[diffPos..<(after.count - diffEnd)])
+            logCorrection("'\(original)'→'\(corrected)' context: '\(contextBefore)'→'\(contextAfter)' full: '\(bufferBefore)'→'\(bufferAfter)'")
+        }
+
+        updateClientDisplay(ctx: ctx, session: session, client: client)
     }
 
     private func getBopomofoReading(_ ctx: OpaquePointer) -> String {
