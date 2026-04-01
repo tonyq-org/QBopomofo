@@ -231,6 +231,21 @@ impl PhraseSelector {
             .lookup(&syllables, self.lookup_strategy)
             .into_iter()
             .collect::<Vec<_>>();
+        // For multi-character phrases, also include single-character candidates
+        // for the character at the cursor position so users can correct individual characters.
+        if self.end - self.begin > 1 {
+            let single_pos = if self.orig < self.end { self.orig } else { self.begin };
+            if let Some(sym) = self.com.symbol(single_pos) {
+                if let Some(syl) = sym.to_syllable() {
+                    let single_candidates = dict.lookup(&[syl], self.lookup_strategy);
+                    candidates.extend(single_candidates.into_iter());
+                    let alt = editor.syl.alt_syllables(syl);
+                    for &alt_syl in alt {
+                        candidates.extend(dict.lookup(&[alt_syl], self.lookup_strategy).into_iter());
+                    }
+                }
+            }
+        }
         if self.end - self.begin == 1 {
             let alt = editor
                 .syl
@@ -245,12 +260,28 @@ impl PhraseSelector {
         candidates.into_iter().map(|ph| ph.into()).collect()
     }
 
+    /// Build interval for the selected phrase.
+    /// For single-character selections from a multi-char range, narrow the interval
+    /// to just the character at the cursor position.
     pub(crate) fn interval(&self, phrase: impl Into<Box<str>>) -> Interval {
-        Interval {
-            start: self.begin,
-            end: self.end,
-            is_phrase: true,
-            text: phrase.into(),
+        let text: Box<str> = phrase.into();
+        let phrase_chars = text.chars().count();
+        let range_len = self.end - self.begin;
+        if phrase_chars < range_len {
+            let start = if self.orig < self.end { self.orig } else { self.begin };
+            Interval {
+                start,
+                end: start + phrase_chars,
+                is_phrase: true,
+                text,
+            }
+        } else {
+            Interval {
+                start: self.begin,
+                end: self.end,
+                is_phrase: true,
+                text,
+            }
         }
     }
 }
