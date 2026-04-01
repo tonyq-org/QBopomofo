@@ -411,9 +411,34 @@ class QBopomofoInputController: IMKInputController {
         }
 
         if !display.isEmpty {
+            let nsDisplay = display as NSString
+
+            // Compute cursor position in display string (UTF-16 offset for NSRange)
+            let chewingCursor = Int(chewing_cursor_Current(ctx))
+            let chineseUTF16Len = (chinese as NSString).length
+            let bopoUTF16Len = (bopomofo as NSString).length
+            let chineseStart = nsDisplay.length - bopoUTF16Len - chineseUTF16Len
+            // Convert char-based chewing cursor to UTF-16 offset within chinese
+            let clampedCursor = min(chewingCursor, chinese.count)
+            let charIndex = chinese.index(chinese.startIndex, offsetBy: clampedCursor)
+            let cursorUTF16 = chinese[chinese.startIndex..<charIndex].utf16.count
+            let cursorPos = max(0, min(nsDisplay.length, chineseStart + cursorUTF16))
+            dbg("cursor: chewing=\(chewingCursor) cursorPos=\(cursorPos) displayUTF16Len=\(nsDisplay.length) candMode=\(inCandMode)")
+
+            // Build attributed string: thick underline on char at cursor, thin on the rest.
+            let attrStr = NSMutableAttributedString(string: display)
+            let fullRange = NSRange(location: 0, length: nsDisplay.length)
+            attrStr.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: fullRange)
+            attrStr.addAttribute(.markedClauseSegment, value: 0, range: fullRange)
+            // Thick underline on the character at cursor
+            if cursorPos < nsDisplay.length {
+                let cursorCharRange = nsDisplay.rangeOfComposedCharacterSequence(at: cursorPos)
+                attrStr.addAttribute(.underlineStyle, value: NSUnderlineStyle.thick.rawValue, range: cursorCharRange)
+                attrStr.addAttribute(.markedClauseSegment, value: 1, range: cursorCharRange)
+            }
             client.setMarkedText(
-                display,
-                selectionRange: NSRange(location: display.count, length: 0),
+                attrStr,
+                selectionRange: NSRange(location: cursorPos, length: 0),
                 replacementRange: NSRange(location: NSNotFound, length: 0)
             )
         } else {
