@@ -68,6 +68,9 @@ class QBopomofoInputController: IMKInputController {
 
     private var candidatePanel: CandidatePanel { CandidatePanel.shared }
 
+    /// 選字鍵（從偏好設定載入）
+    private var selectionKeys: [Character] = Array("1234567890")
+
     // MARK: - Lifecycle
 
     override init!(server: IMKServer!, delegate: Any!, client inputClient: Any!) {
@@ -126,6 +129,10 @@ class QBopomofoInputController: IMKInputController {
 
         let shiftBehavior = defaults.integer(forKey: "org.qbopomofo.shiftBehavior")
         qb_composing_set_shift_behavior(session, shiftBehavior > 0 ? Int32(shiftBehavior) : 1)
+
+        let selKeysStr = defaults.string(forKey: "org.qbopomofo.selectionKeys") ?? "1234567890"
+        selectionKeys = Array(selKeysStr)
+        candidatePanel.selectionKeyLabels = selectionKeys.map { String($0) }
 
         chewing_set_maxChiSymbolLen(ctx, 20)
         chewing_set_spaceAsSelection(ctx, 1)
@@ -350,10 +357,11 @@ class QBopomofoInputController: IMKInputController {
                 updateClientDisplay(ctx: ctx, session: session, client: client)
                 return true
             default:
-                // Number keys 1-9 select directly
-                if let ch = chars.first, ch >= "1" && ch <= "9" {
-                    let idx = Int(ch.asciiValue! - Character("1").asciiValue!)
-                    selectCandidateAndLog(ctx: ctx, session: session, client: client, index: idx, source: "#\(idx+1)")
+                // Selection keys (configurable: 1234567890 or asdfghjkl;)
+                if let ch = chars.first,
+                   let idx = selectionKeys.firstIndex(of: ch),
+                   idx < candidatePanel.candidates.count {
+                    selectCandidateAndLog(ctx: ctx, session: session, client: client, index: idx, source: "key:\(ch)")
                     return true
                 }
             }

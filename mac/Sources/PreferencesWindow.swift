@@ -7,7 +7,7 @@ class PreferencesWindow: NSWindow {
 
     private init() {
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 340),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -19,9 +19,9 @@ class PreferencesWindow: NSWindow {
     }
 
     private func setupUI() {
-        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 340))
 
-        var y = 250
+        var y = 290
 
         // Title
         let titleLabel = NSTextField(labelWithString: "Q注音 設定")
@@ -57,6 +57,20 @@ class PreferencesWindow: NSWindow {
         shiftPopup.target = self
         shiftPopup.action = #selector(shiftBehaviorChanged(_:))
         contentView.addSubview(shiftPopup)
+        y -= 36
+
+        // Selection keys
+        let selLabel = NSTextField(labelWithString: "選字鍵：")
+        selLabel.frame = NSRect(x: 20, y: y, width: 140, height: 22)
+        contentView.addSubview(selLabel)
+
+        let selPopup = NSPopUpButton(frame: NSRect(x: 170, y: y - 2, width: 180, height: 26))
+        selPopup.addItems(withTitles: ["1234567890", "asdfghjkl;"])
+        let currentSel = UserDefaults.standard.string(forKey: "org.qbopomofo.selectionKeys") ?? "1234567890"
+        selPopup.selectItem(withTitle: currentSel)
+        selPopup.target = self
+        selPopup.action = #selector(selectionKeysChanged(_:))
+        contentView.addSubview(selPopup)
         y -= 36
 
         // CapsLock behavior
@@ -101,6 +115,13 @@ class PreferencesWindow: NSWindow {
         let value = sender.indexOfSelectedItem + 1 // 1=SmartToggle, 2=Traditional
         UserDefaults.standard.set(value, forKey: "org.qbopomofo.shiftBehavior")
         NotificationCenter.default.post(name: .qbopomofoPreferencesChanged, object: nil)
+    }
+
+    @objc private func selectionKeysChanged(_ sender: NSPopUpButton) {
+        if let title = sender.titleOfSelectedItem {
+            UserDefaults.standard.set(title, forKey: "org.qbopomofo.selectionKeys")
+            NotificationCenter.default.post(name: .qbopomofoPreferencesChanged, object: nil)
+        }
     }
 
     @objc private func capsLockChanged(_ sender: NSPopUpButton) {

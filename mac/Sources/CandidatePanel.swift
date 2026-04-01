@@ -78,6 +78,9 @@ class CandidatePanel: NSPanel {
 
     // MARK: - Public API
 
+    /// 選字鍵標籤（由 InputController 根據偏好設定更新）
+    var selectionKeyLabels: [String] = ["1","2","3","4","5","6","7","8","9","0"]
+
     func setCandidates(_ list: [String], page: Int, totalPages: Int) {
         candidates = list
         highlightedIndex = 0
@@ -158,7 +161,7 @@ class CandidatePanel: NSPanel {
 
         // Build new rows
         for (i, cand) in candidates.enumerated() {
-            let keyLabel = i < 9 ? "\(i + 1)" : ""
+            let keyLabel = i < selectionKeyLabels.count ? selectionKeyLabels[i] : ""
             let row = CandidateRowView(keyLabel: keyLabel, candidate: cand)
             stackView.addArrangedSubview(row)
             row.translatesAutoresizingMaskIntoConstraints = false
