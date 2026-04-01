@@ -518,15 +518,26 @@ class QBopomofoInputController: IMKInputController {
         // Build display via Rust session (handles mixed Chinese/English)
         let chinese = getChewingBuffer(ctx)
         let bopomofo = getBopomofoReading(ctx)
-        dbg("display chinese='\(chinese)' bopo='\(bopomofo)' bufLen=\(chewing_buffer_Len(ctx)) candPages=\(candTotal) candMode=\(inCandMode)")
-        let display = chinese.withCString { chinBuf in
-            bopomofo.withCString { bopoBuf -> String in
-                if let ptr = qb_composing_build_display(session, chinBuf, bopoBuf) {
-                    let s = String(cString: ptr)
-                    chewing_free(ptr)
-                    return s
+        let hasMixed = qb_composing_has_mixed_content(session) != 0
+        let chewingCursor = Int(chewing_cursor_Current(ctx))
+        dbg("display chinese='\(chinese)' bopo='\(bopomofo)' bufLen=\(chewing_buffer_Len(ctx)) cursor=\(chewingCursor) candPages=\(candTotal) candMode=\(inCandMode)")
+
+        let display: String
+        if !hasMixed {
+            // Pure Chinese: insert bopomofo at cursor position, not at end
+            let clampedCursor = min(chewingCursor, chinese.count)
+            let charIndex = chinese.index(chinese.startIndex, offsetBy: clampedCursor)
+            display = String(chinese[chinese.startIndex..<charIndex]) + bopomofo + String(chinese[charIndex...])
+        } else {
+            display = chinese.withCString { chinBuf in
+                bopomofo.withCString { bopoBuf -> String in
+                    if let ptr = qb_composing_build_display(session, chinBuf, bopoBuf) {
+                        let s = String(cString: ptr)
+                        chewing_free(ptr)
+                        return s
+                    }
+                    return chinese + bopomofo
                 }
-                return chinese + bopomofo
             }
         }
 
@@ -543,18 +554,19 @@ class QBopomofoInputController: IMKInputController {
         }
 
         if !display.isEmpty {
-            let hasMixed = qb_composing_has_mixed_content(session) != 0
             let nsDisplay = display as NSString
             lastDisplayCharCount = display.count
 
             // Compute cursor position (UTF-16 offset)
             let cursorPos: Int
             if !hasMixed {
-                // Pure Chinese mode: display = chinese + bopomofo, cursor maps directly
-                let chewingCursor = Int(chewing_cursor_Current(ctx))
+                // Pure Chinese mode: display = chinese[0..cursor] + bopomofo + chinese[cursor..]
+                // Cursor goes after the bopomofo insertion
                 let clampedCursor = min(chewingCursor, chinese.count)
                 let charIndex = chinese.index(chinese.startIndex, offsetBy: clampedCursor)
-                cursorPos = chinese[chinese.startIndex..<charIndex].utf16.count
+                let beforeCursorUTF16 = chinese[chinese.startIndex..<charIndex].utf16.count
+                let bopoUTF16 = (bopomofo as NSString).length
+                cursorPos = beforeCursorUTF16 + bopoUTF16
             } else if let mcp = mixedDisplayCursor {
                 // Mixed content with explicit cursor position
                 let clampedPos = min(mcp, display.count)
