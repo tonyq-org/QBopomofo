@@ -246,6 +246,85 @@ pub extern "C" fn qb_composing_delete_at_cursor(
     s.inner.delete_at(cursor as usize, chinese, bopo)
 }
 
+/// Query the region type at a given display cursor position.
+/// Returns: 0=Segment(Chinese), 1=Segment(English), 2=RemainingChinese,
+///          3=Bopomofo, 4=EnglishBuffer, -1=at/past end
+#[unsafe(no_mangle)]
+pub extern "C" fn qb_composing_cursor_region(
+    session: *const QBComposingSession,
+    cursor: i32,
+    chinese_buffer: *const c_char,
+    bopomofo: *const c_char,
+) -> i32 {
+    if session.is_null() || cursor < 0 {
+        return -1;
+    }
+    let s = unsafe { &*session };
+    let chinese = if chinese_buffer.is_null() {
+        ""
+    } else {
+        unsafe { CStr::from_ptr(chinese_buffer) }
+            .to_str()
+            .unwrap_or("")
+    };
+    let bopo = if bopomofo.is_null() {
+        ""
+    } else {
+        unsafe { CStr::from_ptr(bopomofo) }
+            .to_str()
+            .unwrap_or("")
+    };
+    s.inner.cursor_region(cursor as usize, chinese, bopo)
+}
+
+/// Convert a display cursor position to the corresponding chewing engine cursor position.
+/// Returns the chewing cursor index, or -1 if the position is not in a Chinese region.
+#[unsafe(no_mangle)]
+pub extern "C" fn qb_composing_display_to_chewing_cursor(
+    session: *const QBComposingSession,
+    cursor: i32,
+    chinese_buffer: *const c_char,
+    bopomofo: *const c_char,
+) -> i32 {
+    if session.is_null() || cursor < 0 {
+        return -1;
+    }
+    let s = unsafe { &*session };
+    let chinese = if chinese_buffer.is_null() {
+        ""
+    } else {
+        unsafe { CStr::from_ptr(chinese_buffer) }
+            .to_str()
+            .unwrap_or("")
+    };
+    let bopo = if bopomofo.is_null() {
+        ""
+    } else {
+        unsafe { CStr::from_ptr(bopomofo) }
+            .to_str()
+            .unwrap_or("")
+    };
+    s.inner.display_to_chewing_cursor(cursor as usize, chinese, bopo)
+}
+
+/// Re-synchronize Chinese segments after chewing buffer changed (e.g. candidate selection).
+#[unsafe(no_mangle)]
+pub extern "C" fn qb_composing_resync_chinese(
+    session: *mut QBComposingSession,
+    chinese_buffer: *const c_char,
+) {
+    if session.is_null() { return; }
+    let s = unsafe { &mut *session };
+    let buf = if chinese_buffer.is_null() {
+        ""
+    } else {
+        unsafe { CStr::from_ptr(chinese_buffer) }
+            .to_str()
+            .unwrap_or("")
+    };
+    s.inner.resync_chinese(buf);
+}
+
 /// Set Shift behavior. 0=None, 1=SmartToggle, 2=ToggleOnly.
 #[unsafe(no_mangle)]
 pub extern "C" fn qb_composing_set_shift_behavior(session: *mut QBComposingSession, behavior: i32) {

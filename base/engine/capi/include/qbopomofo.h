@@ -101,6 +101,33 @@ int qb_composing_insert_at_cursor(QBComposingSession *session, uint8_t ch, int c
 int qb_composing_delete_at_cursor(QBComposingSession *session, int cursor,
                                    const char *chinese_buffer, const char *bopomofo);
 
+/**
+ * Query the region type at a given display cursor position.
+ * @param cursor display cursor position (character index).
+ * @param chinese_buffer current chewing buffer (UTF-8).
+ * @param bopomofo current bopomofo reading (UTF-8).
+ * @return 0=Chinese(segment), 1=English(segment), 2=RemainingChinese,
+ *         3=Bopomofo, 4=EnglishBuffer, -1=at/past end
+ */
+int qb_composing_cursor_region(const QBComposingSession *session, int cursor,
+                                const char *chinese_buffer, const char *bopomofo);
+
+/**
+ * Convert a display cursor position to the corresponding chewing engine cursor position.
+ * @param cursor display cursor position (character index).
+ * @param chinese_buffer current chewing buffer (UTF-8).
+ * @param bopomofo current bopomofo reading (UTF-8).
+ * @return chewing cursor index, or -1 if the position is not in a Chinese region.
+ */
+int qb_composing_display_to_chewing_cursor(const QBComposingSession *session, int cursor,
+                                            const char *chinese_buffer, const char *bopomofo);
+
+/**
+ * Re-synchronize Chinese segments after chewing buffer changed (e.g. candidate selection).
+ * Call this after chewing_cand_choose_by_index when mixed content is active.
+ */
+void qb_composing_resync_chinese(QBComposingSession *session, const char *chinese_buffer);
+
 /** Set Shift behavior. Use QB_SHIFT_* constants. */
 void qb_composing_set_shift_behavior(QBComposingSession *session, int behavior);
 
