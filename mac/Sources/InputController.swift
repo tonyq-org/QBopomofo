@@ -68,6 +68,11 @@ class QBopomofoInputController: IMKInputController {
     private var savedMixedCursor: Int? = nil     // preserved across candidate selection
     private var lastDisplayCharCount: Int = 0    // character count of last display string
     private var currentClient: IMKTextInput?
+    private var spaceCycleMax: Int = 0           // 0=disabled, 1-3=cycle before showing candidates
+    private var spaceCycleRemaining: Int = 0     // remaining cycles before showing candidate window
+    private var spaceCycleSavedCursor: Int? = nil // chewing cursor position before first cycle
+    private var spaceCycleTargets: [String] = [] // pre-computed candidates to cycle through
+    private var spaceCycleStep: Int = 0          // current position in targets
 
     private var candidatePanel: CandidatePanel { CandidatePanel.shared }
 
@@ -136,6 +141,12 @@ class QBopomofoInputController: IMKInputController {
         let selKeysStr = defaults.string(forKey: "org.qbopomofo.selectionKeys") ?? "1234567890"
         selectionKeys = Array(selKeysStr)
         candidatePanel.selectionKeyLabels = selectionKeys.map { String($0) }
+
+        spaceCycleMax = min(max(defaults.integer(forKey: "org.qbopomofo.spaceCycleCount"), 0), 3)
+        spaceCycleRemaining = spaceCycleMax
+        spaceCycleTargets = []
+        spaceCycleStep = 0
+        spaceCycleSavedCursor = nil
 
         chewing_set_maxChiSymbolLen(ctx, 20)
         chewing_set_spaceAsSelection(ctx, 1)
@@ -422,8 +433,10 @@ class QBopomofoInputController: IMKInputController {
                 dbg("cand page ← (page \(chewing_cand_CurrentPage(ctx)+1)/\(chewing_cand_TotalPage(ctx)))")
                 updateClientDisplay(ctx: ctx, session: session, client: client)
                 return true
-            case 49: // Space — select current candidate
-                selectCandidateAndLog(ctx: ctx, session: session, client: client, index: candidatePanel.highlightedIndex, source: "space")
+            case 49: // Space — next page
+                chewing_handle_Right(ctx)
+                dbg("cand space page → (page \(chewing_cand_CurrentPage(ctx)+1)/\(chewing_cand_TotalPage(ctx)))")
+                updateClientDisplay(ctx: ctx, session: session, client: client)
                 return true
             case 51: // Backspace — close candidates and delete
                 chewing_cand_close(ctx)
@@ -484,6 +497,104 @@ class QBopomofoInputController: IMKInputController {
         }
         mixedDisplayCursor = nil
 
+        // Space cycle: silently replace with next candidate before opening the window
+        if keyCode == 49 && !isCandMode && spaceCycleRemaining > 0 && chewing_buffer_Len(ctx) > 0 {
+            // First cycle: enter cand mode, compute all targets upfront
+            if spaceCycleTargets.isEmpty {
+                spaceCycleSavedCursor = Int(chewing_cursor_Current(ctx))
+
+                // Get the original text at cursor
+                // When cursor is at end of buffer, engine uses cursor-1 (same as symbol_for_select)
+                let buf = Array(getChewingBuffer(ctx))
+                let cur = spaceCycleSavedCursor ?? 0
+                let selectPos = cur >= buf.count ? max(cur - 1, 0) : cur
+
+                chewing_handle_Space(ctx) // enters selecting mode
+
+                if inCandidateMode(ctx) {
+                    let candidates = getCandidateList(ctx)
+
+                    // Exclude any candidate that matches the current buffer text at cursor
+                    // (candidates may have mixed lengths: 1-char and 2-char phrases)
+                    var excluded = Set<String>()
+                    for cand in candidates {
+                        let candLen = cand.count
+                        let end = min(selectPos + candLen, buf.count)
+                        if selectPos < end && String(buf[selectPos..<end]) == cand {
+                            excluded.insert(cand)
+                        }
+                    }
+
+                    // Pre-compute distinct candidates to cycle through
+                    var seen = excluded
+                    for cand in candidates {
+                        if !seen.contains(cand) {
+                            spaceCycleTargets.append(cand)
+                            seen.insert(cand)
+                            if spaceCycleTargets.count >= spaceCycleMax { break }
+                        }
+                    }
+                    dbg("spaceCycle: excluded=\(excluded) targets=\(spaceCycleTargets)")
+
+                    if spaceCycleTargets.isEmpty {
+                        // No different candidates at all — stay in cand mode and show panel
+                        spaceCycleRemaining = 0
+                    } else {
+                        // Select the first target
+                        let target = spaceCycleTargets[0]
+                        if let idx = candidates.firstIndex(of: target) {
+                            chewing_cand_choose_by_index(ctx, Int32(idx))
+                            dbg("spaceCycle: → '\(target)' step=0")
+                        }
+                        spaceCycleStep = 1
+                        spaceCycleRemaining -= 1
+                        syncChewingCursor(ctx: ctx, target: spaceCycleSavedCursor ?? 0)
+
+                        if qb_composing_has_mixed_content(session) != 0 {
+                            let newBuf = getChewingBuffer(ctx)
+                            newBuf.withCString { c in qb_composing_resync_chinese(session, c) }
+                        }
+                    }
+                } else {
+                    spaceCycleRemaining = 0
+                    dbg("spaceCycle: cand mode not entered, aborting")
+                }
+            } else if spaceCycleStep < spaceCycleTargets.count {
+                // Subsequent cycles: restore cursor, re-enter cand mode, select next target
+                syncChewingCursor(ctx: ctx, target: spaceCycleSavedCursor ?? 0)
+                chewing_handle_Space(ctx)
+
+                if inCandidateMode(ctx) {
+                    let candidates = getCandidateList(ctx)
+                    let target = spaceCycleTargets[spaceCycleStep]
+                    if let idx = candidates.firstIndex(of: target) {
+                        chewing_cand_choose_by_index(ctx, Int32(idx))
+                        dbg("spaceCycle: → '\(target)' step=\(spaceCycleStep)")
+                    } else {
+                        // Target not found in current list — abort, show panel
+                        spaceCycleRemaining = 0
+                        dbg("spaceCycle: target '\(target)' not found, opening panel")
+                    }
+                    spaceCycleStep += 1
+                    spaceCycleRemaining -= 1
+                    syncChewingCursor(ctx: ctx, target: spaceCycleSavedCursor ?? 0)
+
+                    if qb_composing_has_mixed_content(session) != 0 {
+                        let newBuf = getChewingBuffer(ctx)
+                        newBuf.withCString { c in qb_composing_resync_chinese(session, c) }
+                    }
+                } else {
+                    spaceCycleRemaining = 0
+                }
+            } else {
+                spaceCycleRemaining = 0
+            }
+
+            restoreMixedCursorIfNeeded()
+            updateClientDisplay(ctx: ctx, session: session, client: client)
+            return true
+        }
+
         // Chinese mode — send to chewing engine
         let handled = processChewingKey(ctx: ctx, keyCode: keyCode, chars: chars)
         if handled { updateClientDisplay(ctx: ctx, session: session, client: client) }
@@ -493,6 +604,14 @@ class QBopomofoInputController: IMKInputController {
     // MARK: - Key Processing (Chinese only)
 
     private func processChewingKey(ctx: OpaquePointer, keyCode: UInt16, chars: String) -> Bool {
+        // Reset space cycle state on non-Space keys
+        if keyCode != 49 {
+            spaceCycleRemaining = spaceCycleMax
+            spaceCycleTargets = []
+            spaceCycleStep = 0
+            spaceCycleSavedCursor = nil
+        }
+
         switch keyCode {
         case 36: chewing_handle_Enter(ctx); return true
         case 51: chewing_handle_Backspace(ctx); return true
@@ -700,6 +819,10 @@ class QBopomofoInputController: IMKInputController {
         chewing_Reset(ctx)
         mixedDisplayCursor = nil
         savedMixedCursor = nil
+        spaceCycleRemaining = spaceCycleMax
+        spaceCycleTargets = []
+        spaceCycleStep = 0
+        spaceCycleSavedCursor = nil
     }
 
     override func commitComposition(_ sender: Any!) {

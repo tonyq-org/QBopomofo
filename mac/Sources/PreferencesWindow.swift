@@ -7,7 +7,7 @@ class PreferencesWindow: NSWindow {
 
     private init() {
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 400, height: 340),
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 376),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -19,9 +19,9 @@ class PreferencesWindow: NSWindow {
     }
 
     private func setupUI() {
-        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 340))
+        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 376))
 
-        var y = 290
+        var y = 326
 
         // Title
         let titleLabel = NSTextField(labelWithString: "Q注音 設定")
@@ -87,6 +87,20 @@ class PreferencesWindow: NSWindow {
         contentView.addSubview(capsPopup)
         y -= 36
 
+        // Space cycle count
+        let cycleLabel = NSTextField(labelWithString: "空白鍵自動選字：")
+        cycleLabel.frame = NSRect(x: 20, y: y, width: 140, height: 22)
+        contentView.addSubview(cycleLabel)
+
+        let cyclePopup = NSPopUpButton(frame: NSRect(x: 170, y: y - 2, width: 180, height: 26))
+        cyclePopup.addItems(withTitles: ["0（直接開啟候選字）", "1 次", "2 次", "3 次"])
+        let currentCycle = UserDefaults.standard.integer(forKey: "org.qbopomofo.spaceCycleCount")
+        cyclePopup.selectItem(at: min(max(currentCycle, 0), 3))
+        cyclePopup.target = self
+        cyclePopup.action = #selector(spaceCycleCountChanged(_:))
+        contentView.addSubview(cyclePopup)
+        y -= 36
+
         // Persistent logging
         let logCheck = NSButton(checkboxWithTitle: "保留偵錯紀錄（/tmp/qbopomofo-*.log）", target: self, action: #selector(persistentLogChanged(_:)))
         logCheck.frame = NSRect(x: 20, y: y, width: 360, height: 22)
@@ -126,6 +140,11 @@ class PreferencesWindow: NSWindow {
 
     @objc private func capsLockChanged(_ sender: NSPopUpButton) {
         UserDefaults.standard.set(sender.indexOfSelectedItem, forKey: "org.qbopomofo.capsLockBehavior")
+        NotificationCenter.default.post(name: .qbopomofoPreferencesChanged, object: nil)
+    }
+
+    @objc private func spaceCycleCountChanged(_ sender: NSPopUpButton) {
+        UserDefaults.standard.set(sender.indexOfSelectedItem, forKey: "org.qbopomofo.spaceCycleCount")
         NotificationCenter.default.post(name: .qbopomofoPreferencesChanged, object: nil)
     }
 
