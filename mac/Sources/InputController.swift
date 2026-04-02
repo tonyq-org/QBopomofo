@@ -226,7 +226,11 @@ class QBopomofoInputController: IMKInputController {
             let passthroughKeys: Set<UInt16> = [
                 36, 51, 117, 123, 124, 125, 126, 116, 121, 115, 119, 53, 48
             ]
-            if passthroughKeys.contains(keyCode) { return false }
+            if passthroughKeys.contains(keyCode) {
+                // Mark Shift as used so release won't toggle mode (e.g. Shift+Enter for newline)
+                if shift { qb_composing_mark_shift_used(session) }
+                return false
+            }
             if keyCode == 49 { // Space → output space
                 client.insertText(" ", replacementRange: NSRange(location: NSNotFound, length: 0))
                 return true
