@@ -498,7 +498,7 @@ class QBopomofoInputController: IMKInputController {
         mixedDisplayCursor = nil
 
         // Space cycle: silently replace with next candidate before opening the window
-        if keyCode == 49 && !isCandMode && spaceCycleRemaining > 0 && chewing_buffer_Len(ctx) > 0 {
+        if keyCode == 49 && !isCandMode && spaceCycleRemaining > 0 && chewing_buffer_Len(ctx) > 0 && chewing_bopomofo_Check(ctx) == 0 {
             // First cycle: enter cand mode, compute all targets upfront
             if spaceCycleTargets.isEmpty {
                 spaceCycleSavedCursor = Int(chewing_cursor_Current(ctx))
