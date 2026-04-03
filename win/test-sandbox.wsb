@@ -1,0 +1,18 @@
+<Configuration>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>C:\workspaces\tonyq\QBopomofo\win\out</HostFolder>
+      <SandboxFolder>C:\QBopomofo</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>C:\workspaces\tonyq\QBopomofo\win</HostFolder>
+      <SandboxFolder>C:\QBopomofoSrc</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>powershell -ExecutionPolicy Bypass -NoExit -File C:\QBopomofoSrc\sandbox-setup.ps1</Command>
+  </LogonCommand>
+  <MemoryInMB>2048</MemoryInMB>
+</Configuration>

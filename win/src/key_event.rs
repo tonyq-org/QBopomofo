@@ -2,9 +2,51 @@
 //!
 //! Maps Windows virtual key codes to chewing engine KeyboardEvent.
 
+#[cfg(windows)]
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyboardState, ToUnicode, MapVirtualKeyW, MAPVK_VK_TO_VSC,
+};
+
 use chewing::input::keycode::{self, Keycode};
 use chewing::input::keysym::{self, Keysym};
 use chewing::input::KeyboardEvent;
+
+/// Translate a Windows virtual key code to a character using ToUnicode.
+///
+/// This calls the Win32 `ToUnicode` API to get the character that corresponds
+/// to the given virtual key with the current keyboard layout and modifier state.
+#[cfg(windows)]
+pub fn translate_char(vkey: u32, _lparam: u32, _shift: bool) -> char {
+    let scan_code = unsafe { MapVirtualKeyW(vkey, MAPVK_VK_TO_VSC) };
+    let mut keyboard_state = [0u8; 256];
+    unsafe { let _ = GetKeyboardState(&mut keyboard_state); }
+
+    let mut buf = [0u16; 4];
+    let result = unsafe {
+        ToUnicode(vkey, scan_code, Some(&keyboard_state), &mut buf, 0)
+    };
+
+    if result == 1 {
+        char::decode_utf16(buf.iter().copied())
+            .next()
+            .and_then(|r| r.ok())
+            .unwrap_or('\0')
+    } else {
+        '\0'
+    }
+}
+
+/// Fallback for non-Windows platforms (testing).
+#[cfg(not(windows))]
+pub fn translate_char(vkey: u32, _lparam: u32, shift: bool) -> char {
+    match vkey {
+        0x30..=0x39 if !shift => (b'0' + (vkey - 0x30) as u8) as char,
+        0x41..=0x5A if shift => (b'A' + (vkey - 0x41) as u8) as char,
+        0x41..=0x5A => (b'a' + (vkey - 0x41) as u8) as char,
+        0x20 => ' ',
+        _ => '\0',
+    }
+}
 
 /// Convert a Windows virtual key code to a chewing KeyboardEvent.
 ///
@@ -30,11 +72,12 @@ pub fn vkey_to_keyboard_event(
 
     let code = vkey_to_keycode(vkey)?;
 
-    // Map character to keysym
-    let ksym = if (ch as u32) > 0 && (ch as u32) <= 0x7F {
-        Keysym(ch as u32)
-    } else {
-        keysym::SYM_NONE
+    // Map character to keysym — special keys need X11-style keysyms,
+    // printable ASCII maps directly to its code point.
+    let ksym = match vkey_to_keysym(vkey) {
+        Some(sym) => sym,
+        None if (ch as u32) > 0 && (ch as u32) <= 0x7F => Keysym(ch as u32),
+        None => keysym::SYM_NONE,
     };
 
     let evt = KeyboardEvent::builder()
@@ -120,4 +163,26 @@ fn vkey_to_keycode(vkey: u32) -> Option<Keycode> {
         _ => return None,
     };
     Some(code)
+}
+
+/// Map Windows VK_* to chewing Keysym for special (non-printable) keys.
+/// Printable ASCII is handled separately via the `ch` parameter.
+fn vkey_to_keysym(vkey: u32) -> Option<Keysym> {
+    let sym = match vkey {
+        0x08 => keysym::SYM_BACKSPACE,
+        0x09 => keysym::SYM_TAB,
+        0x0D => keysym::SYM_RETURN,
+        0x1B => keysym::SYM_ESC,
+        0x2E => keysym::SYM_DELETE,
+        0x21 => keysym::SYM_PAGEUP,
+        0x22 => keysym::SYM_PAGEDOWN,
+        0x23 => keysym::SYM_END,
+        0x24 => keysym::SYM_HOME,
+        0x25 => keysym::SYM_LEFT,
+        0x26 => keysym::SYM_UP,
+        0x27 => keysym::SYM_RIGHT,
+        0x28 => keysym::SYM_DOWN,
+        _ => return None,
+    };
+    Some(sym)
 }
