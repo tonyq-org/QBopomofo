@@ -27,9 +27,8 @@ cargo build --release 2>&1 | tail -3
 BUILD_TS=$(date '+%Y-%m-%d %H:%M:%S')
 echo "let kBuildTimestamp = \"$BUILD_TS\"" > "$SCRIPT_DIR/Sources/BuildInfo.swift"
 
-# Step 4: Clear stale SwiftPM plugin outputs so the app links the latest Rust archive
-rm -rf "$SCRIPT_DIR/.build/plugins/outputs/engine/CChewing/destination/CargoBuild/cargo-target"
-rm -rf "$SCRIPT_DIR/.build/plugins/outputs/libchewing/CChewing/destination/CargoBuild/cargo-target"
+# Step 4: Clear stale SwiftPM outputs so the app links the latest Rust archive
+rm -rf "$SCRIPT_DIR/.build"
 
 # Step 5: Build release binary
 echo "→ Building Swift release binary..."

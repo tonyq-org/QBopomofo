@@ -234,6 +234,13 @@ class QBopomofoInputController: IMKInputController {
             guard hasContent else { return false }
             return insertASCIIIntoComposition(numpadDigit, ctx: ctx, session: session, client: client, source: "numpadDigit")
         }
+        if keyCode == 49 && hasContent && !isCandMode && chewing_bopomofo_Check(ctx) == 0 {
+            spaceCycleRemaining = spaceCycleMax
+            spaceCycleTargets = []
+            spaceCycleStep = 0
+            spaceCycleSavedCursor = nil
+            return insertASCIIIntoComposition(" ", ctx: ctx, session: session, client: client, source: "inlineSpace")
+        }
         if !hasContent && !isCandMode {
             let passthroughKeys: Set<UInt16> = [
                 36, 51, 117, 123, 124, 125, 126, 116, 121, 115, 119, 53, 48
