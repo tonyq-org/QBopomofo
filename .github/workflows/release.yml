@@ -1,0 +1,104 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Build dictionary data
+        run: bash data-provider/build.sh
+
+      - name: Build universal Rust library
+        run: |
+          cd base/engine/capi
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p ../target/release
+          lipo -create \
+            ../target/aarch64-apple-darwin/release/libchewing_capi.a \
+            ../target/x86_64-apple-darwin/release/libchewing_capi.a \
+            -output ../target/release/libchewing_capi.a
+          echo "Universal library:"
+          lipo -info ../target/release/libchewing_capi.a
+
+      - name: Build universal Swift binary
+        run: |
+          cd mac
+          BUILD_TS=$(date '+%Y-%m-%d %H:%M:%S')
+          echo "let kBuildTimestamp = \"$BUILD_TS\"" > Sources/BuildInfo.swift
+          LIBCHEWING_AUTO_BUILD_CARGO=0 swift build -c release --arch arm64 --arch x86_64
+
+      - name: Assemble app bundle
+        run: |
+          cd mac
+          APP_BUNDLE=".build/QBopomofo.app"
+          rm -rf "$APP_BUNDLE"
+          mkdir -p "$APP_BUNDLE/Contents/MacOS"
+          mkdir -p "$APP_BUNDLE/Contents/Resources"
+
+          BINARY="$(LIBCHEWING_AUTO_BUILD_CARGO=0 swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/QBopomofo"
+          cp "$BINARY" "$APP_BUNDLE/Contents/MacOS/QBopomofo"
+          cp Info.plist "$APP_BUNDLE/Contents/Info.plist"
+          echo -n "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"
+
+          # Dictionary data
+          for f in word.dat tsi.dat symbols.dat swkb.dat; do
+            cp "../data-provider/output/$f" "$APP_BUNDLE/Contents/Resources/"
+          done
+
+          # Icons
+          cp Resources/QBopomofo.tiff "$APP_BUNDLE/Contents/Resources/" 2>/dev/null || true
+          cp Resources/AppIcon.icns "$APP_BUNDLE/Contents/Resources/" 2>/dev/null || true
+
+          # Localization
+          for lproj in Base.lproj zh-Hant.lproj en.lproj; do
+            if [ -d "Resources/$lproj" ]; then
+              cp -R "Resources/$lproj" "$APP_BUNDLE/Contents/Resources/"
+            fi
+          done
+
+          # Inject version from tag
+          VERSION="${GITHUB_REF_NAME#v}"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP_BUNDLE/Contents/Info.plist"
+
+          # Ad-hoc code sign
+          codesign --deep --force --sign - "$APP_BUNDLE"
+
+          echo "Universal binary:"
+          lipo -info "$APP_BUNDLE/Contents/MacOS/QBopomofo"
+
+      - name: Create DMG
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          DMG_NAME="QBopomofo-${VERSION}-universal.dmg"
+
+          mkdir -p dmg_staging
+          cp -R mac/.build/QBopomofo.app dmg_staging/
+
+          hdiutil create \
+            -volname "QBopomofo ${VERSION}" \
+            -srcfolder dmg_staging \
+            -ov -format UDZO \
+            "$DMG_NAME"
+
+          echo "dmg_name=$DMG_NAME" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.dmg_name }}
+          generate_release_notes: true
