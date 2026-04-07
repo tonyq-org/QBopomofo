@@ -230,9 +230,9 @@ class QBopomofoInputController: IMKInputController {
         // Nothing in buffer/bopomofo and not in candidate mode → pass through navigation keys
         let hasContent = chewing_buffer_Len(ctx) > 0 || chewing_bopomofo_Check(ctx) != 0
             || qb_composing_has_mixed_content(session) != 0
-        if let numpadDigit = numpadDigitCharacter(for: keyCode), !isCandMode {
+        if let npChar = numpadCharacter(for: keyCode), !isCandMode {
             guard hasContent else { return false }
-            return insertASCIIIntoComposition(numpadDigit, ctx: ctx, session: session, client: client, source: "numpadDigit")
+            return insertASCIIIntoComposition(npChar, ctx: ctx, session: session, client: client, source: "numpad")
         }
         if keyCode == 49 && hasContent && !isCandMode && chewing_bopomofo_Check(ctx) == 0 {
             spaceCycleRemaining = spaceCycleMax
@@ -812,7 +812,7 @@ class QBopomofoInputController: IMKInputController {
         }
     }
 
-    private func numpadDigitCharacter(for keyCode: UInt16) -> Character? {
+    private func numpadCharacter(for keyCode: UInt16) -> Character? {
         switch keyCode {
         case 82: return "0"
         case 83: return "1"
@@ -824,6 +824,12 @@ class QBopomofoInputController: IMKInputController {
         case 89: return "7"
         case 91: return "8"
         case 92: return "9"
+        case 75: return "/"
+        case 67: return "*"
+        case 78: return "-"
+        case 69: return "+"
+        case 65: return "."
+        case 81: return "="
         default: return nil
         }
     }
