@@ -40,7 +40,16 @@ jobs:
           cd mac
           BUILD_TS=$(date '+%Y-%m-%d %H:%M:%S')
           echo "let kBuildTimestamp = \"$BUILD_TS\"" > Sources/BuildInfo.swift
-          LIBCHEWING_AUTO_BUILD_CARGO=0 swift build -c release --arch arm64 --arch x86_64
+
+          # Build each arch separately (--arch x --arch y uses xcodebuild which can't resolve SPM plugins)
+          LIBCHEWING_AUTO_BUILD_CARGO=0 swift build -c release --triple arm64-apple-macosx
+          LIBCHEWING_AUTO_BUILD_CARGO=0 swift build -c release --triple x86_64-apple-macosx
+
+          ARM_BIN="$(LIBCHEWING_AUTO_BUILD_CARGO=0 swift build -c release --triple arm64-apple-macosx --show-bin-path)/QBopomofo"
+          X86_BIN="$(LIBCHEWING_AUTO_BUILD_CARGO=0 swift build -c release --triple x86_64-apple-macosx --show-bin-path)/QBopomofo"
+          lipo -create "$ARM_BIN" "$X86_BIN" -output .build/QBopomofo-universal
+          echo "Universal binary:"
+          lipo -info .build/QBopomofo-universal
 
       - name: Assemble app bundle
         run: |
@@ -50,8 +59,7 @@ jobs:
           mkdir -p "$APP_BUNDLE/Contents/MacOS"
           mkdir -p "$APP_BUNDLE/Contents/Resources"
 
-          BINARY="$(LIBCHEWING_AUTO_BUILD_CARGO=0 swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/QBopomofo"
-          cp "$BINARY" "$APP_BUNDLE/Contents/MacOS/QBopomofo"
+          cp .build/QBopomofo-universal "$APP_BUNDLE/Contents/MacOS/QBopomofo"
           cp Info.plist "$APP_BUNDLE/Contents/Info.plist"
           echo -n "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"
 
