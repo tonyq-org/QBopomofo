@@ -210,7 +210,13 @@ class QBopomofoInputController: IMKInputController {
             let changed = chineseBuf.withCString { cStr in
                 qb_composing_handle_shift(session, isShift ? 1 : 0, cStr)
             }
-            if changed != 0 { updateClientDisplay(ctx: ctx, session: session, client: client) }
+            if changed != 0 {
+                // Clear residual bopomofo when switching to English mode
+                if qb_composing_is_english(session) != 0 {
+                    chewing_clean_bopomofo_buf(ctx)
+                }
+                updateClientDisplay(ctx: ctx, session: session, client: client)
+            }
             return changed != 0
         }
 
