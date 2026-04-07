@@ -57,6 +57,7 @@ private func logCorrection(_ entry: String) {
 /// 負責處理按鍵事件、與 libchewing 引擎互動、管理輸入狀態
 /// 組字邏輯（Shift SmartToggle、中英混排）委託給 Rust ComposingSession (qb_composing_*)
 @objc(QBopomofoInputController)
+@MainActor
 class QBopomofoInputController: IMKInputController {
 
     // MARK: - Properties
