@@ -1,4 +1,4 @@
-/// Test that the engine selects the correct character based on frequency.
+/// Test that the engine selects the correct character/phrase based on frequency.
 /// Uses the QBopomofo dictionary data from data-provider/output/.
 use std::error::Error;
 use std::ffi::CStr;
@@ -130,5 +130,33 @@ fn common_single_chars_by_freq() -> Result<(), Box<dyn Error>> {
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn jiu_yi_zhi_bei_not_jiu_yi_zhi_bei_medical() -> Result<(), Box<dyn Error>> {
+    // ㄐㄧㄡˋ ㄧ ㄓˊ ㄅㄟˋ → should be 就一直被, NOT 就醫植被
+    // Standard keyboard layout:
+    //   r=ㄐ u=ㄧ .=ㄡ 4=ˋ → ㄐㄧㄡˋ (就)
+    //   u=ㄧ (space to commit single medial) → ㄧ (一)
+    //   5=ㄓ 6=ˊ → ㄓˊ (直)
+    //   1=ㄅ o=ㄟ 4=ˋ → ㄅㄟˋ (被)
+    let preedit = unsafe { type_keys_and_get_preedit("ru.4u 561o4")? };
+    eprintln!("preedit for 就一直被: {}", preedit);
+    assert!(
+        !preedit.contains("就醫"),
+        "Should NOT contain 就醫, got: {}",
+        preedit
+    );
+    assert!(
+        !preedit.contains("植被"),
+        "Should NOT contain 植被, got: {}",
+        preedit
+    );
+    assert!(
+        preedit.contains("一直"),
+        "Should contain 一直, got: {}",
+        preedit
+    );
     Ok(())
 }
