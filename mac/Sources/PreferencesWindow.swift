@@ -92,10 +92,10 @@ class PreferencesWindow: NSWindow {
         cycleLabel.frame = NSRect(x: 20, y: y, width: 140, height: 22)
         contentView.addSubview(cycleLabel)
 
-        let cyclePopup = NSPopUpButton(frame: NSRect(x: 170, y: y - 2, width: 180, height: 26))
-        cyclePopup.addItems(withTitles: ["0（直接開啟候選字）", "1 次", "2 次", "3 次"])
+        let cyclePopup = NSPopUpButton(frame: NSRect(x: 170, y: y - 2, width: 200, height: 26))
+        cyclePopup.addItems(withTitles: ["直接輸出空白", "直接開啟候選字", "選 1 次常用字", "選 2 次常用字", "選 3 次常用字"])
         let currentCycle = UserDefaults.standard.integer(forKey: "org.qbopomofo.spaceCycleCount")
-        cyclePopup.selectItem(at: min(max(currentCycle, 0), 3))
+        cyclePopup.selectItem(at: min(max(currentCycle + 1, 0), 4))
         cyclePopup.target = self
         cyclePopup.action = #selector(spaceCycleCountChanged(_:))
         contentView.addSubview(cyclePopup)
@@ -151,7 +151,7 @@ class PreferencesWindow: NSWindow {
     }
 
     @objc private func spaceCycleCountChanged(_ sender: NSPopUpButton) {
-        UserDefaults.standard.set(sender.indexOfSelectedItem, forKey: "org.qbopomofo.spaceCycleCount")
+        UserDefaults.standard.set(sender.indexOfSelectedItem - 1, forKey: "org.qbopomofo.spaceCycleCount")
         NotificationCenter.default.post(name: .qbopomofoPreferencesChanged, object: nil)
     }
 

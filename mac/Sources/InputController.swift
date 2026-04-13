@@ -145,7 +145,7 @@ class QBopomofoInputController: IMKInputController {
         selectionKeys = Array(selKeysStr)
         candidatePanel.selectionKeyLabels = selectionKeys.map { String($0) }
 
-        spaceCycleMax = min(max(defaults.integer(forKey: "org.qbopomofo.spaceCycleCount"), 0), 3)
+        spaceCycleMax = min(max(defaults.integer(forKey: "org.qbopomofo.spaceCycleCount"), -1), 3)
         spaceCycleRemaining = spaceCycleMax
         spaceCycleTargets = []
         spaceCycleStep = 0
@@ -246,8 +246,8 @@ class QBopomofoInputController: IMKInputController {
             guard hasContent else { return false }
             return insertASCIIIntoComposition(npChar, ctx: ctx, session: session, client: client, source: "numpad")
         }
-        if keyCode == 49 && hasContent && !isCandMode && chewing_bopomofo_Check(ctx) == 0 {
-            spaceCycleRemaining = spaceCycleMax
+        if keyCode == 49 && hasContent && !isCandMode && chewing_bopomofo_Check(ctx) == 0 && spaceCycleMax < 0 {
+            spaceCycleRemaining = 0
             spaceCycleTargets = []
             spaceCycleStep = 0
             spaceCycleSavedCursor = nil
