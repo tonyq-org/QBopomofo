@@ -151,6 +151,13 @@ class QBopomofoInputController: IMKInputController {
         spaceCycleStep = 0
         spaceCycleSavedCursor = nil
 
+        // Input mode: 0 = standard (engine 1), 1 = abbreviated (engine 3)
+        let inputMode = defaults.integer(forKey: "org.qbopomofo.inputMode")
+        let engineValue: Int32 = inputMode == 1 ? 3 : 1
+        "chewing.conversion_engine".withCString {
+            chewing_config_set_int(ctx, $0, engineValue)
+        }
+
         chewing_set_maxChiSymbolLen(ctx, 20)
         chewing_set_spaceAsSelection(ctx, 1)
         chewing_set_escCleanAllBuf(ctx, 1)

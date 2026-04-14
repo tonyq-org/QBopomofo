@@ -11,7 +11,10 @@ use std::{
 };
 
 use chewing::{
-    conversion::{ChewingEngine, FuzzyChewingEngine, Interval, SimpleEngine, Symbol},
+    conversion::{
+        AbbreviatedChewingEngine, ChewingEngine, FuzzyChewingEngine, Interval, SimpleEngine,
+        Symbol,
+    },
     dictionary::{DEFAULT_DICT_NAMES, LookupStrategy},
     editor::{
         BasicEditor, CharacterForm, ConversionEngineKind, Editor, EditorKeyBehavior, LanguageMode,
@@ -38,9 +41,9 @@ use log::{debug, info};
 use crate::{
     logger::init_scoped_logging,
     public::{
-        CHEWING_CONVERSION_ENGINE, CHINESE_MODE, ChewingConfigData, ChewingContext, FULLSHAPE_MODE,
-        FUZZY_CHEWING_CONVERSION_ENGINE, HALFSHAPE_MODE, IntervalType, MAX_SELKEY,
-        SIMPLE_CONVERSION_ENGINE, SYMBOL_MODE, SelKeys,
+        ABBREVIATED_CHEWING_CONVERSION_ENGINE, CHEWING_CONVERSION_ENGINE, CHINESE_MODE,
+        ChewingConfigData, ChewingContext, FULLSHAPE_MODE, FUZZY_CHEWING_CONVERSION_ENGINE,
+        HALFSHAPE_MODE, IntervalType, MAX_SELKEY, SIMPLE_CONVERSION_ENGINE, SYMBOL_MODE, SelKeys,
     },
 };
 
@@ -429,6 +432,9 @@ pub unsafe extern "C" fn chewing_config_get_int(
             ConversionEngineKind::SimpleEngine => SIMPLE_CONVERSION_ENGINE,
             ConversionEngineKind::ChewingEngine => CHEWING_CONVERSION_ENGINE,
             ConversionEngineKind::FuzzyChewingEngine => FUZZY_CHEWING_CONVERSION_ENGINE,
+            ConversionEngineKind::AbbreviatedChewingEngine => {
+                ABBREVIATED_CHEWING_CONVERSION_ENGINE
+            }
         },
         "chewing.enable_fullwidth_toggle_key" => option.enable_fullwidth_toggle_key as c_int,
         "chewing.sort_candidates_by_frequency" => option.sort_candidates_by_frequency as c_int,
@@ -546,6 +552,12 @@ pub unsafe extern "C" fn chewing_config_set_int(
                         .set_conversion_engine(Box::new(FuzzyChewingEngine::new()));
                     options.lookup_strategy = LookupStrategy::FuzzyPartialPrefix;
                     ConversionEngineKind::FuzzyChewingEngine
+                }
+                ABBREVIATED_CHEWING_CONVERSION_ENGINE => {
+                    ctx.editor
+                        .set_conversion_engine(Box::new(AbbreviatedChewingEngine::new()));
+                    options.lookup_strategy = LookupStrategy::FuzzyPartialPrefix;
+                    ConversionEngineKind::AbbreviatedChewingEngine
                 }
                 _ => return ERROR,
             }

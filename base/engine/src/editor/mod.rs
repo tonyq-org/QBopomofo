@@ -60,6 +60,7 @@ pub enum ConversionEngineKind {
     SimpleEngine,
     ChewingEngine,
     FuzzyChewingEngine,
+    AbbreviatedChewingEngine,
 }
 
 #[derive(Debug, Clone, Copy)]

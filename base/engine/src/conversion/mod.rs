@@ -5,12 +5,14 @@ use std::{
     fmt::Debug,
 };
 
+pub use self::abbreviated::AbbreviatedChewingEngine;
 pub use self::chewing::ChewingEngine;
 pub use self::fuzzy::FuzzyChewingEngine;
 pub use self::simple::SimpleEngine;
 pub(crate) use self::symbol::{full_width_symbol_input, special_symbol_input};
 use crate::{dictionary::Dictionary, zhuyin::Syllable};
 
+mod abbreviated;
 mod chewing;
 mod fuzzy;
 mod simple;

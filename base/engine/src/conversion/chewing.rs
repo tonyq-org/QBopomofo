@@ -15,6 +15,7 @@ use crate::{
 #[derive(Debug, Default)]
 pub struct ChewingEngine {
     pub(crate) lookup_strategy: LookupStrategy,
+    pub(crate) abbreviated_mode: bool,
 }
 
 impl ChewingEngine {
@@ -23,6 +24,7 @@ impl ChewingEngine {
     pub fn new() -> ChewingEngine {
         ChewingEngine {
             lookup_strategy: LookupStrategy::Standard,
+            abbreviated_mode: false,
         }
     }
     pub(crate) fn convert<'a>(
@@ -148,7 +150,11 @@ impl ChewingEngine {
             .map(|s| s.to_syllable().unwrap_or_default())
             .collect();
 
-        let max_phrases_count = 10;
+        // In abbreviated mode, allow more candidates (fuzzy matching returns
+        // more results) and use weight tables that strongly favor multi-char
+        // phrases over single-char matches (which are very noisy with
+        // initial-only input).
+        let max_phrases_count = if self.abbreviated_mode { 15 } else { 10 };
         // Scaling factor for frequency-to-probability conversion. ln(global_total)
         // acts as an implicit per-segment penalty in path scoring. Too large causes
         // over-merging (rare compounds beat common words); too small causes
@@ -177,14 +183,27 @@ impl ChewingEngine {
             })
             .map(|phrase| {
                 let log_phrase_prob = (phrase.freq().clamp(1, 9999999) as f64 / global_total).ln();
-                let log_length_prob: f64 = match syllables.len() {
-                    // log probability of phrase lenght calculated from tsi.src
-                    1 => -1.520439227173415,
-                    2 => -0.4236568120124837,
-                    3 => -1.455835986003893,
-                    4 => -1.6178072894679227,
-                    5 => -4.425765184802149,
-                    _ => -4.787357595622411,
+                let log_length_prob: f64 = if self.abbreviated_mode {
+                    // Abbreviated mode weights: heavily penalize single chars
+                    // (noisy with initial-only input) and reward 2-4 char phrases.
+                    match syllables.len() {
+                        1 => -3.0,
+                        2 => -0.1,
+                        3 => -0.6,
+                        4 => -0.8,
+                        5 => -3.5,
+                        _ => -4.5,
+                    }
+                } else {
+                    match syllables.len() {
+                        // log probability of phrase length calculated from tsi.src
+                        1 => -1.520439227173415,
+                        2 => -0.4236568120124837,
+                        3 => -1.455835986003893,
+                        4 => -1.6178072894679227,
+                        5 => -4.425765184802149,
+                        _ => -4.787357595622411,
+                    }
                 };
                 let log_prob = log_phrase_prob + log_length_prob;
                 debug_assert!(log_prob.is_normal());
@@ -546,7 +565,10 @@ mod tests {
 
     use super::ChewingEngine;
     use crate::{
-        conversion::{Composition, Gap, Interval, Outcome, Symbol, chewing::Edge},
+        conversion::{
+            AbbreviatedChewingEngine, Composition, ConversionEngine, Gap, Interval, Outcome,
+            Symbol, chewing::Edge,
+        },
         dictionary::{Dictionary, TrieBuf},
         syl,
         zhuyin::Bopomofo::*,
@@ -1026,5 +1048,83 @@ mod tests {
         assert_eq!(40, engine.convert(&dict, &composition)[0].intervals.len());
         assert_eq!(41, engine.convert(&dict, &composition)[1].intervals.len());
         assert_eq!(41, engine.convert(&dict, &composition)[2].intervals.len());
+    }
+
+    // Note: FuzzyPartialPrefix lookup with initial-only syllables is tested
+    // at the trie level (dictionary/trie.rs). These tests verify the
+    // abbreviated engine's weight behavior using full syllables.
+
+    #[test]
+    fn abbreviated_convert_full_syllables() {
+        let dict = test_dictionary();
+        let engine = AbbreviatedChewingEngine::new();
+        let mut composition = Composition::new();
+        // Full syllables — abbreviated engine should still produce correct results
+        for sym in [
+            Symbol::from(syl![G, U, O, TONE2]),
+            Symbol::from(syl![M, I, EN, TONE2]),
+        ] {
+            composition.push(sym);
+        }
+        let results = engine.convert(&dict, &composition);
+        assert!(!results.is_empty());
+        assert_eq!(
+            vec![Interval {
+                start: 0,
+                end: 2,
+                is_phrase: true,
+                text: "國民".into()
+            }],
+            results[0].intervals
+        );
+    }
+
+    #[test]
+    fn abbreviated_weight_favors_phrases_over_singles() {
+        let dict = test_dictionary();
+        let abbreviated = AbbreviatedChewingEngine::new();
+        let standard = ChewingEngine::new();
+        let mut composition = Composition::new();
+        for sym in [
+            Symbol::from(syl![G, U, O, TONE2]),
+            Symbol::from(syl![M, I, EN, TONE2]),
+            Symbol::from(syl![D, A, TONE4]),
+            Symbol::from(syl![H, U, EI, TONE4]),
+            Symbol::from(syl![D, AI, TONE4]),
+            Symbol::from(syl![B, I, AU, TONE3]),
+        ] {
+            composition.push(sym);
+        }
+        let abbr_results = abbreviated.convert(&dict, &composition);
+        let std_results = standard.convert(&dict, &composition);
+        // Both should produce the same top-level segmentation
+        assert_eq!(std_results[0].intervals, abbr_results[0].intervals);
+        // But abbreviated mode should have a higher score gap between
+        // phrase path and single-char path (stronger preference for phrases)
+        let abbr_top = abbr_results[0].log_prob;
+        let std_top = std_results[0].log_prob;
+        // Abbreviated weights give better scores to multi-char phrases
+        assert!(abbr_top > std_top);
+    }
+
+    #[test]
+    fn abbreviated_convert_four_syllables() {
+        let dict = test_dictionary();
+        let engine = AbbreviatedChewingEngine::new();
+        let mut composition = Composition::new();
+        for sym in [
+            Symbol::from(syl![G, U, O, TONE2]),
+            Symbol::from(syl![M, I, EN, TONE2]),
+            Symbol::from(syl![D, A, TONE4]),
+            Symbol::from(syl![H, U, EI, TONE4]),
+        ] {
+            composition.push(sym);
+        }
+        let results = engine.convert(&dict, &composition);
+        assert!(!results.is_empty());
+        let top = &results[0].intervals;
+        assert_eq!(2, top.len());
+        assert_eq!("國民", top[0].text.as_ref());
+        assert_eq!("大會", top[1].text.as_ref());
     }
 }

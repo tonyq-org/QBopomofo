@@ -7,7 +7,7 @@ class PreferencesWindow: NSWindow {
 
     private init() {
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 400, height: 406),
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 442),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -19,9 +19,9 @@ class PreferencesWindow: NSWindow {
     }
 
     private func setupUI() {
-        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 406))
+        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 442))
 
-        var y = 356
+        var y = 392
 
         // Title
         let titleLabel = NSTextField(labelWithString: "Q注音 設定")
@@ -29,6 +29,20 @@ class PreferencesWindow: NSWindow {
         titleLabel.frame = NSRect(x: 20, y: y, width: 360, height: 24)
         contentView.addSubview(titleLabel)
         y -= 40
+
+        // Input mode
+        let modeLabel = NSTextField(labelWithString: "輸入模式：")
+        modeLabel.frame = NSRect(x: 20, y: y, width: 140, height: 22)
+        contentView.addSubview(modeLabel)
+
+        let modePopup = NSPopUpButton(frame: NSRect(x: 170, y: y - 2, width: 180, height: 26))
+        modePopup.addItems(withTitles: ["標準注音", "簡拼注音"])
+        let currentMode = UserDefaults.standard.integer(forKey: "org.qbopomofo.inputMode")
+        modePopup.selectItem(at: currentMode)
+        modePopup.target = self
+        modePopup.action = #selector(inputModeChanged(_:))
+        contentView.addSubview(modePopup)
+        y -= 36
 
         // Candidates per page
         let candLabel = NSTextField(labelWithString: "每頁候選字數量：")
@@ -123,6 +137,12 @@ class PreferencesWindow: NSWindow {
         contentView.addSubview(versionLabel)
 
         self.contentView = contentView
+    }
+
+    @objc private func inputModeChanged(_ sender: NSPopUpButton) {
+        // 0 = standard, 1 = abbreviated
+        UserDefaults.standard.set(sender.indexOfSelectedItem, forKey: "org.qbopomofo.inputMode")
+        NotificationCenter.default.post(name: .qbopomofoPreferencesChanged, object: nil)
     }
 
     @objc private func candPerPageChanged(_ sender: NSPopUpButton) {

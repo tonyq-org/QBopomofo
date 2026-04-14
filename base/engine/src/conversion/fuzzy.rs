@@ -13,6 +13,7 @@ impl FuzzyChewingEngine {
         FuzzyChewingEngine {
             inner: ChewingEngine {
                 lookup_strategy: LookupStrategy::FuzzyPartialPrefix,
+                abbreviated_mode: false,
             },
         }
     }

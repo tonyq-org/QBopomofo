@@ -8,7 +8,9 @@
 //! Dictionaries are shared across modes — only the layout and conversion
 //! strategy change. Zero performance overhead for mode switching.
 
-use crate::conversion::{ChewingEngine, ConversionEngine, FuzzyChewingEngine, SimpleEngine};
+use crate::conversion::{
+    AbbreviatedChewingEngine, ChewingEngine, ConversionEngine, FuzzyChewingEngine, SimpleEngine,
+};
 use crate::editor::zhuyin_layout::{
     DaiChien26, Et, Et26, GinYieh, Hsu, Ibm, Pinyin, Standard, SyllableEditor,
 };
@@ -46,6 +48,7 @@ pub enum ConversionKind {
     Simple,
     Chewing,
     FuzzyChewing,
+    AbbreviatedChewing,
 }
 
 /// What action Shift key performs in this mode.
@@ -164,6 +167,28 @@ impl TypingMode {
         }
     }
 
+    /// Create the abbreviated bopomofo mode (initials-only matching).
+    ///
+    /// Users type only the initial consonant (聲母) of each syllable and the
+    /// engine fuzzy-matches against full dictionary entries. Scoring weights
+    /// are tuned to strongly prefer multi-character phrases over single chars.
+    pub fn abbreviated_bopomofo() -> Self {
+        Self {
+            info: TypingModeInfo {
+                id: "bopomofo-abbreviated".into(),
+                name: "簡拼注音".into(),
+                description: "只打聲母即可匹配詞組的簡拼模式".into(),
+            },
+            layout: KeyboardLayout::Standard,
+            conversion: ConversionKind::AbbreviatedChewing,
+            preferences: ModePreferences {
+                shift_behavior: ShiftBehavior::SmartToggle,
+                caps_lock_behavior: CapsLockBehavior::None,
+                ..Default::default()
+            },
+        }
+    }
+
     /// Create the Hsu bopomofo mode.
     pub fn hsu_bopomofo() -> Self {
         Self {
@@ -200,6 +225,7 @@ impl TypingMode {
             ConversionKind::Simple => Box::new(SimpleEngine::new()),
             ConversionKind::Chewing => Box::new(ChewingEngine::new()),
             ConversionKind::FuzzyChewing => Box::new(FuzzyChewingEngine::new()),
+            ConversionKind::AbbreviatedChewing => Box::new(AbbreviatedChewingEngine::new()),
         }
     }
 
@@ -216,6 +242,7 @@ impl TypingMode {
             Self::q_bopomofo(),
             Self::standard_bopomofo(),
             Self::fuzzy_bopomofo(),
+            Self::abbreviated_bopomofo(),
             Self::hsu_bopomofo(),
         ]
     }
