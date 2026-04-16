@@ -241,7 +241,8 @@ class QBopomofoInputController: IMKInputController {
         let shift = modifiers.contains(.shift)
 
         let isCandMode = inCandidateMode(ctx)
-        dbg("key=\(keyCode) chars=\(chars) candMode=\(isCandMode)")
+        let capsLock = modifiers.contains(.capsLock)
+        dbg("key=\(keyCode) chars=\(chars) shift=\(shift) caps=\(capsLock) candMode=\(isCandMode)")
 
         // Pass through Command/Control
         if modifiers.contains(.command) || modifiers.contains(.control) { return false }
