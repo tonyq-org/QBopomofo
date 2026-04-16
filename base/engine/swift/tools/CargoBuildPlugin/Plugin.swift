@@ -56,12 +56,23 @@ struct CargoBuildPlugin: BuildToolPlugin {
       targetDir,
     ]
 
+    let existingPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+    let pluginPathEntries = [
+      "/opt/homebrew/bin",
+      "/usr/local/bin",
+      "\(home)/.cargo/bin",
+      existingPath,
+    ].filter { !$0.isEmpty }
+    let pluginEnvironment = [
+      "PATH": pluginPathEntries.joined(separator: ":")
+    ]
+
     return [
       .prebuildCommand(
         displayName: "Building chewing_capi via cargo",
         executable: cargo,
         arguments: args,
-        environment: [:],
+        environment: pluginEnvironment,
         outputFilesDirectory: scratchTarget
       )
     ]

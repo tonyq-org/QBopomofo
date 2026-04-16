@@ -60,6 +60,7 @@ pub enum ConversionEngineKind {
     SimpleEngine,
     ChewingEngine,
     FuzzyChewingEngine,
+    AbbreviatedChewingEngine,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1310,7 +1311,11 @@ impl State for EnteringSyllable {
                                 self.start_entering()
                             }
                         } else {
+                            let syl_str = shared.syl.read().to_string();
                             shared.syl.clear();
+                            for ch in syl_str.chars() {
+                                shared.com.insert(Symbol::Char(ch));
+                            }
                             self.start_entering()
                         }
                     }

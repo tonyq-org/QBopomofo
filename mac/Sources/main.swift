@@ -1,7 +1,7 @@
 import Cocoa
 import InputMethodKit
 
-private let kConnectionName = "QBopomofo_Connection"
+private let kConnectionName = "org.qbopomofo.inputmethod.QBopomofo_Connection"
 
 // Install mode: register input source with macOS
 if CommandLine.arguments.count > 1 && CommandLine.arguments[1] == "install" {
@@ -13,6 +13,11 @@ if CommandLine.arguments.count > 1 && CommandLine.arguments[1] == "install" {
 
 // Must initialize NSApplication before creating IMKServer
 let app = NSApplication.shared
+
+// Register default preferences (auto-learn off by default)
+UserDefaults.standard.register(defaults: [
+    "org.qbopomofo.disableAutoLearn": true,
+])
 
 // Initialize the input method server
 guard let bundleID = Bundle.main.bundleIdentifier else {
@@ -43,6 +48,9 @@ if persistentLogEnabled {
     let link = "/tmp/qbopomofo.log"
     try? FileManager.default.removeItem(atPath: link)
     try? FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: logPath)
+
+    // Redirect stderr to log file so Rust engine debug logs also appear
+    freopen(logPath, "a", stderr)
 
     if let fh = FileHandle(forWritingAtPath: logPath) {
         fh.seekToEndOfFile()

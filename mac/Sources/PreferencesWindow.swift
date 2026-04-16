@@ -7,7 +7,7 @@ class PreferencesWindow: NSWindow {
 
     private init() {
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 400, height: 376),
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 442),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -19,9 +19,9 @@ class PreferencesWindow: NSWindow {
     }
 
     private func setupUI() {
-        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 376))
+        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 442))
 
-        var y = 326
+        var y = 392
 
         // Title
         let titleLabel = NSTextField(labelWithString: "Q注音 設定")
@@ -29,6 +29,20 @@ class PreferencesWindow: NSWindow {
         titleLabel.frame = NSRect(x: 20, y: y, width: 360, height: 24)
         contentView.addSubview(titleLabel)
         y -= 40
+
+        // Input mode
+        let modeLabel = NSTextField(labelWithString: "輸入模式：")
+        modeLabel.frame = NSRect(x: 20, y: y, width: 140, height: 22)
+        contentView.addSubview(modeLabel)
+
+        let modePopup = NSPopUpButton(frame: NSRect(x: 170, y: y - 2, width: 180, height: 26))
+        modePopup.addItems(withTitles: ["標準注音", "簡拼注音"])
+        let currentMode = UserDefaults.standard.integer(forKey: "org.qbopomofo.inputMode")
+        modePopup.selectItem(at: currentMode)
+        modePopup.target = self
+        modePopup.action = #selector(inputModeChanged(_:))
+        contentView.addSubview(modePopup)
+        y -= 36
 
         // Candidates per page
         let candLabel = NSTextField(labelWithString: "每頁候選字數量：")
@@ -92,14 +106,21 @@ class PreferencesWindow: NSWindow {
         cycleLabel.frame = NSRect(x: 20, y: y, width: 140, height: 22)
         contentView.addSubview(cycleLabel)
 
-        let cyclePopup = NSPopUpButton(frame: NSRect(x: 170, y: y - 2, width: 180, height: 26))
-        cyclePopup.addItems(withTitles: ["0（直接開啟候選字）", "1 次", "2 次", "3 次"])
+        let cyclePopup = NSPopUpButton(frame: NSRect(x: 170, y: y - 2, width: 200, height: 26))
+        cyclePopup.addItems(withTitles: ["直接輸出空白", "直接開啟候選字", "選 1 次常用字", "選 2 次常用字", "選 3 次常用字"])
         let currentCycle = UserDefaults.standard.integer(forKey: "org.qbopomofo.spaceCycleCount")
-        cyclePopup.selectItem(at: min(max(currentCycle, 0), 3))
+        cyclePopup.selectItem(at: min(max(currentCycle + 1, 0), 4))
         cyclePopup.target = self
         cyclePopup.action = #selector(spaceCycleCountChanged(_:))
         contentView.addSubview(cyclePopup)
         y -= 36
+
+        // Auto-learn
+        let learnCheck = NSButton(checkboxWithTitle: "自動學習詞頻（根據使用習慣調整選字順序）", target: self, action: #selector(autoLearnChanged(_:)))
+        learnCheck.frame = NSRect(x: 20, y: y, width: 360, height: 22)
+        learnCheck.state = UserDefaults.standard.bool(forKey: "org.qbopomofo.disableAutoLearn") ? .off : .on
+        contentView.addSubview(learnCheck)
+        y -= 30
 
         // Persistent logging
         let logCheck = NSButton(checkboxWithTitle: "保留偵錯紀錄（/tmp/qbopomofo-*.log）", target: self, action: #selector(persistentLogChanged(_:)))
@@ -116,6 +137,12 @@ class PreferencesWindow: NSWindow {
         contentView.addSubview(versionLabel)
 
         self.contentView = contentView
+    }
+
+    @objc private func inputModeChanged(_ sender: NSPopUpButton) {
+        // 0 = standard, 1 = abbreviated
+        UserDefaults.standard.set(sender.indexOfSelectedItem, forKey: "org.qbopomofo.inputMode")
+        NotificationCenter.default.post(name: .qbopomofoPreferencesChanged, object: nil)
     }
 
     @objc private func candPerPageChanged(_ sender: NSPopUpButton) {
@@ -144,7 +171,12 @@ class PreferencesWindow: NSWindow {
     }
 
     @objc private func spaceCycleCountChanged(_ sender: NSPopUpButton) {
-        UserDefaults.standard.set(sender.indexOfSelectedItem, forKey: "org.qbopomofo.spaceCycleCount")
+        UserDefaults.standard.set(sender.indexOfSelectedItem - 1, forKey: "org.qbopomofo.spaceCycleCount")
+        NotificationCenter.default.post(name: .qbopomofoPreferencesChanged, object: nil)
+    }
+
+    @objc private func autoLearnChanged(_ sender: NSButton) {
+        UserDefaults.standard.set(sender.state == .off, forKey: "org.qbopomofo.disableAutoLearn")
         NotificationCenter.default.post(name: .qbopomofoPreferencesChanged, object: nil)
     }
 

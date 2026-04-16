@@ -185,12 +185,12 @@ fn project_data_dir() -> Option<PathBuf> {
                 .join("im.chewing.Chewing")
         });
     }
-    #[cfg(not(target_family = "unix"))]
+    #[cfg(not(any(target_family = "unix", target_os = "macos")))]
     {
         return None;
     }
 
-    #[cfg(target_family = "unix")]
+    #[cfg(all(target_family = "unix", not(target_os = "macos")))]
     {
         if let Ok(path) = env::var("XDG_DATA_HOME") {
             return Some(PathBuf::from(path).join("chewing"));

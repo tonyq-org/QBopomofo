@@ -27,7 +27,10 @@ cargo build --release 2>&1 | tail -3
 BUILD_TS=$(date '+%Y-%m-%d %H:%M:%S')
 echo "let kBuildTimestamp = \"$BUILD_TS\"" > "$SCRIPT_DIR/Sources/BuildInfo.swift"
 
-# Step 4: Build release binary
+# Step 4: Clear stale SwiftPM outputs so the app links the latest Rust archive
+rm -rf "$SCRIPT_DIR/.build"
+
+# Step 5: Build release binary
 echo "→ Building Swift release binary..."
 cd "$SCRIPT_DIR"
 swift build -c release 2>&1
@@ -38,7 +41,7 @@ if [ ! -f "$BINARY" ]; then
     exit 1
 fi
 
-# Step 5: Assemble .app bundle
+# Step 6: Assemble .app bundle
 echo "→ Assembling $APP_NAME.app..."
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
@@ -70,7 +73,7 @@ for lproj in Base.lproj zh-Hant.lproj en.lproj; do
     fi
 done
 
-# Step 6: Ad-hoc code sign
+# Step 7: Ad-hoc code sign
 echo "→ Code signing..."
 codesign --deep --force --sign - "$APP_BUNDLE" 2>/dev/null || {
     echo "WARNING: Code signing failed (may need Xcode command line tools)"

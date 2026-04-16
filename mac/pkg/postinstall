@@ -1,0 +1,32 @@
+#!/bin/bash
+set -euo pipefail
+
+APP_NAME="QBopomofo"
+APP_PATH="/Library/Input Methods/$APP_NAME.app"
+
+echo "QBopomofo postinstall: refreshing input method registration..."
+
+pkill -9 -f "$APP_NAME.app/Contents/MacOS/$APP_NAME" 2>/dev/null || true
+
+if [ -x "$APP_PATH/Contents/MacOS/$APP_NAME" ]; then
+    "$APP_PATH/Contents/MacOS/$APP_NAME" install || true
+fi
+
+logged_in_user="$(stat -f '%Su' /dev/console 2>/dev/null || true)"
+if [ -n "$logged_in_user" ] && [ "$logged_in_user" != "root" ]; then
+    uid="$(id -u "$logged_in_user")"
+    launchctl asuser "$uid" sudo -u "$logged_in_user" "$APP_PATH/Contents/MacOS/$APP_NAME" >/dev/null 2>&1 || true
+fi
+
+cat <<'EOF'
+
+QBopomofo has been installed to /Library/Input Methods.
+
+If this is the first installation:
+  System Settings → Keyboard → Input Sources → + → Q注音
+
+If Q注音 does not appear immediately:
+  1. Close and reopen the current app
+  2. Switch input sources again
+  3. Log out and log back in if needed
+EOF

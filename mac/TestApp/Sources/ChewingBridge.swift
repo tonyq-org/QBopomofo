@@ -627,6 +627,7 @@ enum TypingModeSwift: String, CaseIterable, Identifiable {
     case qBopomofo
     case standardBopomofo
     case fuzzyBopomofo
+    case abbreviatedBopomofo
     case hsuBopomofo
     case ibmBopomofo
     case et26Bopomofo
@@ -639,6 +640,7 @@ enum TypingModeSwift: String, CaseIterable, Identifiable {
         case .qBopomofo: return "Q注音"
         case .standardBopomofo: return "標準注音"
         case .fuzzyBopomofo: return "模糊注音"
+        case .abbreviatedBopomofo: return "簡拼注音"
         case .hsuBopomofo: return "許氏注音"
         case .ibmBopomofo: return "IBM 注音"
         case .et26Bopomofo: return "倚天26鍵"
@@ -651,6 +653,7 @@ enum TypingModeSwift: String, CaseIterable, Identifiable {
         case .qBopomofo: return 0
         case .standardBopomofo: return 0
         case .fuzzyBopomofo: return 0
+        case .abbreviatedBopomofo: return 0
         case .hsuBopomofo: return 1
         case .ibmBopomofo: return 2
         case .et26Bopomofo: return 5
@@ -661,13 +664,14 @@ enum TypingModeSwift: String, CaseIterable, Identifiable {
     var conversionEngine: Int32 {
         switch self {
         case .fuzzyBopomofo: return 2
+        case .abbreviatedBopomofo: return 3
         default: return 1
         }
     }
 
     var defaultShiftBehavior: ShiftBehaviorSwift {
         switch self {
-        case .qBopomofo: return .smartToggle
+        case .qBopomofo, .abbreviatedBopomofo: return .smartToggle
         default: return .none
         }
     }

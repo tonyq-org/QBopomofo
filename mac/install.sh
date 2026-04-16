@@ -19,6 +19,10 @@ for arg in "$@"; do
     esac
 done
 
+# Step 0: Rebuild dictionary data (ensures custom phrases are included)
+echo "→ Building dictionary data..."
+bash "$SCRIPT_DIR/../data-provider/build.sh"
+
 # Step 1: Build
 bash "$SCRIPT_DIR/build-app.sh" $CLEAN_ARG
 

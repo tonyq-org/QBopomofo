@@ -74,7 +74,7 @@ class QBopomofoInputController: IMKInputController {
     private var spaceCycleTargets: [String] = [] // pre-computed candidates to cycle through
     private var spaceCycleStep: Int = 0          // current position in targets
 
-    private var candidatePanel: CandidatePanel { CandidatePanel.shared }
+    nonisolated(unsafe) private var candidatePanel: CandidatePanel { CandidatePanel.shared }
 
     /// 選字鍵（從偏好設定載入）
     private var selectionKeys: [Character] = Array("1234567890")
@@ -95,6 +95,9 @@ class QBopomofoInputController: IMKInputController {
         let dictPath = Bundle.main.resourcePath ?? ""
         dbg("CHEWING_PATH = \(dictPath)")
         setenv("CHEWING_PATH", dictPath, 1)
+        if kDebugMode {
+            setenv("RUST_LOG", "debug", 1)
+        }
 
         chewingContext = chewing_new()
         guard chewingContext != nil else {
@@ -142,16 +145,26 @@ class QBopomofoInputController: IMKInputController {
         selectionKeys = Array(selKeysStr)
         candidatePanel.selectionKeyLabels = selectionKeys.map { String($0) }
 
-        spaceCycleMax = min(max(defaults.integer(forKey: "org.qbopomofo.spaceCycleCount"), 0), 3)
+        spaceCycleMax = min(max(defaults.integer(forKey: "org.qbopomofo.spaceCycleCount"), -1), 3)
         spaceCycleRemaining = spaceCycleMax
         spaceCycleTargets = []
         spaceCycleStep = 0
         spaceCycleSavedCursor = nil
 
+        // Input mode: 0 = standard (engine 1), 1 = abbreviated (engine 3)
+        let inputMode = defaults.integer(forKey: "org.qbopomofo.inputMode")
+        let engineValue: Int32 = inputMode == 1 ? 3 : 1
+        "chewing.conversion_engine".withCString {
+            chewing_config_set_int(ctx, $0, engineValue)
+        }
+
         chewing_set_maxChiSymbolLen(ctx, 20)
         chewing_set_spaceAsSelection(ctx, 1)
         chewing_set_escCleanAllBuf(ctx, 1)
         chewing_set_autoShiftCur(ctx, 1)
+
+        let disableAutoLearn = defaults.bool(forKey: "org.qbopomofo.disableAutoLearn")
+        chewing_set_autoLearn(ctx, disableAutoLearn ? 1 : 0)
     }
 
     @objc private func preferencesDidChange() {
@@ -210,7 +223,13 @@ class QBopomofoInputController: IMKInputController {
             let changed = chineseBuf.withCString { cStr in
                 qb_composing_handle_shift(session, isShift ? 1 : 0, cStr)
             }
-            if changed != 0 { updateClientDisplay(ctx: ctx, session: session, client: client) }
+            if changed != 0 {
+                // Clear residual bopomofo when switching to English mode
+                if qb_composing_is_english(session) != 0 {
+                    chewing_clean_bopomofo_buf(ctx)
+                }
+                updateClientDisplay(ctx: ctx, session: session, client: client)
+            }
             return changed != 0
         }
 
@@ -224,15 +243,23 @@ class QBopomofoInputController: IMKInputController {
         let isCandMode = inCandidateMode(ctx)
         dbg("key=\(keyCode) chars=\(chars) candMode=\(isCandMode)")
 
-        // Pass through Command/Control and numpad keys
+        // Pass through Command/Control
         if modifiers.contains(.command) || modifiers.contains(.control) { return false }
-        // Numpad digit keys (keyCodes 82-92) → pass through unless in candidate mode
-        let numpadDigits: Set<UInt16> = [82,83,84,85,86,87,88,89,91,92] // 0-9 on numpad
-        if numpadDigits.contains(keyCode) && !isCandMode { return false }
 
         // Nothing in buffer/bopomofo and not in candidate mode → pass through navigation keys
         let hasContent = chewing_buffer_Len(ctx) > 0 || chewing_bopomofo_Check(ctx) != 0
             || qb_composing_has_mixed_content(session) != 0
+        if let npChar = numpadCharacter(for: keyCode), !isCandMode {
+            guard hasContent else { return false }
+            return insertASCIIIntoComposition(npChar, ctx: ctx, session: session, client: client, source: "numpad")
+        }
+        if keyCode == 49 && hasContent && !isCandMode && chewing_bopomofo_Check(ctx) == 0 && spaceCycleMax < 0 {
+            spaceCycleRemaining = 0
+            spaceCycleTargets = []
+            spaceCycleStep = 0
+            spaceCycleSavedCursor = nil
+            return insertASCIIIntoComposition(" ", ctx: ctx, session: session, client: client, source: "inlineSpace")
+        }
         if !hasContent && !isCandMode {
             let passthroughKeys: Set<UInt16> = [
                 36, 51, 117, 123, 124, 125, 126, 116, 121, 115, 119, 53, 48
@@ -304,63 +331,10 @@ class QBopomofoInputController: IMKInputController {
             }
             // Space in English mode
             if keyCode == 49 {
-                if let curPos = mixedDisplayCursor {
-                    let chinBuf = getChewingBuffer(ctx)
-                    let bopo = getBopomofoReading(ctx)
-                    let handled = chinBuf.withCString { c in
-                        bopo.withCString { b in
-                            qb_composing_insert_at_cursor(session, UInt8(Character(" ").asciiValue!), Int32(curPos), c, b)
-                        }
-                    }
-                    if handled != 0 {
-                        mixedDisplayCursor = curPos + 1
-                        dbg("english space at cursor \(curPos) → \(mixedDisplayCursor!)")
-                        updateClientDisplay(ctx: ctx, session: session, client: client)
-                        return true
-                    }
-                    mixedDisplayCursor = nil
-                }
-                let chinBuf = getChewingBuffer(ctx)
-                let directCommit = chinBuf.withCString { cStr in
-                    qb_composing_type_english(session, UInt8(Character(" ").asciiValue!), cStr)
-                }
-                if directCommit != 0 {
-                    dbg("insertText=' ' [source:englishSpace]")
-                    client.insertText(" ", replacementRange: NSRange(location: NSNotFound, length: 0))
-                } else {
-                    updateClientDisplay(ctx: ctx, session: session, client: client)
-                }
-                return true
+                return insertASCIIIntoComposition(" ", ctx: ctx, session: session, client: client, source: "englishSpace")
             }
             if let ch = chars.first, ch.isASCII, !ch.isNewline {
-                if let curPos = mixedDisplayCursor {
-                    let chinBuf = getChewingBuffer(ctx)
-                    let bopo = getBopomofoReading(ctx)
-                    let handled = chinBuf.withCString { c in
-                        bopo.withCString { b in
-                            qb_composing_insert_at_cursor(session, UInt8(ch.asciiValue ?? 0), Int32(curPos), c, b)
-                        }
-                    }
-                    if handled != 0 {
-                        mixedDisplayCursor = curPos + 1
-                        dbg("english insert '\(ch)' at cursor \(curPos) → \(mixedDisplayCursor!)")
-                        updateClientDisplay(ctx: ctx, session: session, client: client)
-                        return true
-                    }
-                    // Not in English region: reset cursor, fall through
-                    mixedDisplayCursor = nil
-                }
-                let chinBuf = getChewingBuffer(ctx)
-                let directCommit = chinBuf.withCString { cStr in
-                    qb_composing_type_english(session, UInt8(ch.asciiValue ?? 0), cStr)
-                }
-                if directCommit != 0 {
-                    dbg("insertText='\(ch)' [source:englishChar]")
-                    client.insertText(String(ch), replacementRange: NSRange(location: NSNotFound, length: 0))
-                } else {
-                    updateClientDisplay(ctx: ctx, session: session, client: client)
-                }
-                return true
+                return insertASCIIIntoComposition(ch, ctx: ctx, session: session, client: client, source: "englishChar")
             }
         }
 
@@ -416,9 +390,14 @@ class QBopomofoInputController: IMKInputController {
         // Candidate mode — custom CandidatePanel handles all navigation
         if isCandMode {
             switch keyCode {
-            case 125: // Down — next candidate
-                candidatePanel.highlightNext()
-                dbg("cand ↓ → idx=\(candidatePanel.highlightedIndex)")
+            case 125: // Down — next candidate, or next page if at bottom
+                if !candidatePanel.highlightNext() {
+                    chewing_handle_Right(ctx)
+                    updateClientDisplay(ctx: ctx, session: session, client: client)
+                    dbg("cand ↓ → next page (page \(chewing_cand_CurrentPage(ctx)+1)/\(chewing_cand_TotalPage(ctx)))")
+                } else {
+                    dbg("cand ↓ → idx=\(candidatePanel.highlightedIndex)")
+                }
                 return true
             case 126: // Up — previous candidate
                 candidatePanel.highlightPrevious()
@@ -687,6 +666,12 @@ class QBopomofoInputController: IMKInputController {
         let chinese = getChewingBuffer(ctx)
         let bopomofo = getBopomofoReading(ctx)
         let hasMixed = qb_composing_has_mixed_content(session) != 0
+
+        // Resync Chinese snapshots after engine may have re-segmented the buffer
+        // (e.g. 是→事變). Without this, stale snapshots cause duplicated output.
+        if hasMixed {
+            chinese.withCString { c in qb_composing_resync_chinese(session, c) }
+        }
         let chewingCursor = Int(chewing_cursor_Current(ctx))
         dbg("display chinese='\(chinese)' bopo='\(bopomofo)' bufLen=\(chewing_buffer_Len(ctx)) cursor=\(chewingCursor) candPages=\(candTotal) candMode=\(inCandMode)")
 
@@ -855,6 +840,83 @@ class QBopomofoInputController: IMKInputController {
         } else if target > current {
             for _ in 0..<(target - current) { chewing_handle_Right(ctx) }
         }
+    }
+
+    private func numpadCharacter(for keyCode: UInt16) -> Character? {
+        switch keyCode {
+        case 82: return "0"
+        case 83: return "1"
+        case 84: return "2"
+        case 85: return "3"
+        case 86: return "4"
+        case 87: return "5"
+        case 88: return "6"
+        case 89: return "7"
+        case 91: return "8"
+        case 92: return "9"
+        case 75: return "/"
+        case 67: return "*"
+        case 78: return "-"
+        case 69: return "+"
+        case 65: return "."
+        case 81: return "="
+        default: return nil
+        }
+    }
+
+    private func preferredInsertCursor(ctx: OpaquePointer, session: OpaquePointer) -> Int? {
+        if let cursor = mixedDisplayCursor {
+            return cursor
+        }
+        if qb_composing_has_mixed_content(session) != 0 {
+            return lastDisplayCharCount
+        }
+        // Only return a cursor position if there's actual content in the buffer
+        if chewing_buffer_Len(ctx) > 0 && chewing_bopomofo_Check(ctx) == 0 {
+            return Int(chewing_cursor_Current(ctx))
+        }
+        return nil
+    }
+
+    private func insertASCIIIntoComposition(
+        _ ch: Character,
+        ctx: OpaquePointer,
+        session: OpaquePointer,
+        client: IMKTextInput,
+        source: String
+    ) -> Bool {
+        guard ch.isASCII, let ascii = ch.asciiValue else { return false }
+
+        let chinBuf = getChewingBuffer(ctx)
+        let bopo = getBopomofoReading(ctx)
+
+        if let curPos = preferredInsertCursor(ctx: ctx, session: session) {
+            let handled = chinBuf.withCString { c in
+                bopo.withCString { b in
+                    qb_composing_insert_at_cursor(session, ascii, Int32(curPos), c, b)
+                }
+            }
+            if handled != 0 {
+                mixedDisplayCursor = curPos + 1
+                dbg("\(source) insert '\(ch)' at cursor \(curPos) → \(mixedDisplayCursor!)")
+                updateClientDisplay(ctx: ctx, session: session, client: client)
+                return true
+            }
+            if mixedDisplayCursor != nil {
+                mixedDisplayCursor = nil
+            }
+        }
+
+        let directCommit = chinBuf.withCString { cStr in
+            qb_composing_type_english(session, ascii, cStr)
+        }
+        if directCommit != 0 {
+            dbg("insertText='\(ch)' [source:\(source)]")
+            client.insertText(String(ch), replacementRange: NSRange(location: NSNotFound, length: 0))
+        } else {
+            updateClientDisplay(ctx: ctx, session: session, client: client)
+        }
+        return true
     }
 
     private func getChewingBuffer(_ ctx: OpaquePointer) -> String {

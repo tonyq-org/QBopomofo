@@ -28,6 +28,8 @@ pub const SIMPLE_CONVERSION_ENGINE: c_int = 0;
 pub const CHEWING_CONVERSION_ENGINE: c_int = 1;
 /// Use original Chewing intelligent phrasing with fuzzy prefix search.
 pub const FUZZY_CHEWING_CONVERSION_ENGINE: c_int = 2;
+/// Use abbreviated input mode (initials-only matching with tuned weights).
+pub const ABBREVIATED_CHEWING_CONVERSION_ENGINE: c_int = 3;
 /// Indicates automatic user phrase learning is disabled.
 pub const AUTOLEARN_DISABLED: usize = 1;
 /// Indicates automatic user phrase learning is enabled.

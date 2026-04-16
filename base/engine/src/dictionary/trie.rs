@@ -1,5 +1,4 @@
 use std::{
-    cmp::Ordering,
     collections::VecDeque,
     error::Error,
     fmt::Debug,
@@ -970,13 +969,15 @@ impl TrieBuilder {
                 } else {
                     let mut phrases = node.phrases.clone();
                     phrases.sort_by(|a, b| {
-                        // Don't sort single word leaves.
-                        // But sort phrases first by the frequency, then by the UTF-8 order.
+                        // Sort by frequency (highest first). For single-char entries
+                        // with equal frequency, preserve insertion order (stable sort).
+                        // For multi-char phrases with equal frequency, break ties by
+                        // reverse UTF-8 order.
                         //
                         // NB: this must use a stable sorting algorithm so that lookup
                         // results are stable according to the input file.
                         match (a.as_str().chars().count(), b.as_str().chars().count()) {
-                            (1, 1) => Ordering::Equal,
+                            (1, 1) => b.freq().cmp(&a.freq()),
                             (1, _) | (_, 1) => a.as_str().len().cmp(&b.as_str().len()),
                             _ => {
                                 if a.freq() == b.freq() {
@@ -1545,6 +1546,36 @@ mod tests {
                 LookupStrategy::Standard
             )
         );
+        Ok(())
+    }
+
+    #[test]
+    fn single_char_sorted_by_freq() -> Result<(), Box<dyn std::error::Error>> {
+        // 「用」freq=61256 should come before 「佣」freq=89
+        let mut builder = TrieBuilder::new();
+        builder.insert(
+            &[syl![Bopomofo::IU, Bopomofo::ENG, Bopomofo::TONE4]],
+            ("用", 61256).into(),
+        )?;
+        builder.insert(
+            &[syl![Bopomofo::IU, Bopomofo::ENG, Bopomofo::TONE4]],
+            ("佣", 89).into(),
+        )?;
+        builder.insert(
+            &[syl![Bopomofo::IU, Bopomofo::ENG, Bopomofo::TONE4]],
+            ("醟", 0).into(),
+        )?;
+        let mut cursor = Cursor::new(vec![]);
+        builder.write(&mut cursor)?;
+        cursor.rewind()?;
+        let dict = Trie::new(&mut cursor)?;
+        let result = dict.lookup(
+            &[syl![Bopomofo::IU, Bopomofo::ENG, Bopomofo::TONE4]],
+            LookupStrategy::Standard,
+        );
+        assert_eq!(result[0], Phrase::new("用", 61256));
+        assert_eq!(result[1], Phrase::new("佣", 89));
+        assert_eq!(result[2], Phrase::new("醟", 0));
         Ok(())
     }
 

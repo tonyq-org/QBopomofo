@@ -30,7 +30,7 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>InputMethodConnectionName</key>
-	<string>QBopomofo_Connection</string>
+	<string>org.qbopomofo.inputmethod.QBopomofo_Connection</string>
 	<key>InputMethodServerControllerClass</key>
 	<string>QBopomofoInputController</string>
 	<key>TISInputSourceID</key>
