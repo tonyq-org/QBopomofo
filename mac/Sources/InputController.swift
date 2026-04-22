@@ -109,6 +109,9 @@ class QBopomofoInputController: IMKInputController {
 
         applyPreferences()
 
+        loadCustomDictIfExists()
+        setupSIGUSR1Handler()
+
         dbg("Engine initialized")
 
         // Listen for preference changes
@@ -172,6 +175,55 @@ class QBopomofoInputController: IMKInputController {
         dbg("Preferences reloaded")
     }
 
+    // MARK: - Custom Dictionary Hot-Reload
+
+    static var customDatPath: String? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?.appendingPathComponent("QBopomofo/custom.dat").path
+    }
+
+    // Process-wide singleton: only one DispatchSource per process for SIGUSR1.
+    // Fires a Notification so each InputController instance reloads its own context.
+    private static let signalSource: DispatchSourceSignal = {
+        signal(SIGUSR1, SIG_IGN)
+        let src = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+        src.setEventHandler {
+            NotificationCenter.default.post(name: .qbopomofoReloadCustomDict, object: nil)
+        }
+        src.resume()
+        return src
+    }()
+
+    private func loadCustomDictIfExists() {
+        guard let ctx = chewingContext,
+              let path = Self.customDatPath,
+              FileManager.default.fileExists(atPath: path) else { return }
+        let result = path.withCString { chewing_load_custom_dict(ctx, $0) }
+        dbg("Loaded custom dict: \(path) → \(result == 0 ? "OK" : "FAILED")")
+    }
+
+    private func setupSIGUSR1Handler() {
+        // Trigger lazy init of the process-wide signal source.
+        _ = Self.signalSource
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(reloadCustomDict),
+            name: .qbopomofoReloadCustomDict,
+            object: nil
+        )
+    }
+
+    @objc private func reloadCustomDict() {
+        guard let ctx = chewingContext,
+              let path = Self.customDatPath,
+              FileManager.default.fileExists(atPath: path) else {
+            dbg("Custom dict reload: file not found")
+            return
+        }
+        let result = path.withCString { chewing_load_custom_dict(ctx, $0) }
+        dbg("Reloaded custom dict → \(result == 0 ? "OK" : "FAILED")")
+    }
+
     // MARK: - Menu
 
     override func menu() -> NSMenu! {
@@ -179,6 +231,12 @@ class QBopomofoInputController: IMKInputController {
         let prefsItem = NSMenuItem(title: "偏好設定…", action: #selector(openPreferences(_:)), keyEquivalent: ",")
         prefsItem.target = self
         menu.addItem(prefsItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let reloadItem = NSMenuItem(title: "重新載入自訂詞庫", action: #selector(reloadCustomDict), keyEquivalent: "")
+        reloadItem.target = self
+        menu.addItem(reloadItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -279,17 +337,8 @@ class QBopomofoInputController: IMKInputController {
         // Shift held + typing → English (letters only; punctuation falls through to engine)
         if shift && qb_composing_is_shift_held(session) != 0 {
             if let ch = chars.first, ch.isASCII, ch.isLetter {
-                let chinBuf = getChewingBuffer(ctx)
-                let directCommit = chinBuf.withCString { cStr in
-                    qb_composing_type_english(session, UInt8(ch.asciiValue ?? 0), cStr)
-                }
-                if directCommit != 0 {
-                    dbg("insertText='\(ch)' [source:shiftEnglish]")
-                    client.insertText(String(ch), replacementRange: NSRange(location: NSNotFound, length: 0))
-                } else {
-                    updateClientDisplay(ctx: ctx, session: session, client: client)
-                }
-                return true
+                qb_composing_mark_shift_used(session)
+                return insertASCIIIntoComposition(ch, ctx: ctx, session: session, client: client, source: "shiftEnglish")
             }
             // Non-letter key while Shift held: mark used so release won't toggle mode
             qb_composing_mark_shift_used(session)

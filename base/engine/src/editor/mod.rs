@@ -23,8 +23,8 @@ use crate::{
         special_symbol_input,
     },
     dictionary::{
-        AssetLoader, Dictionary, DictionaryUsage, Layered, LookupStrategy, Trie,
-        UpdateDictionaryError, UserDictionaryManager,
+        AssetLoader, Dictionary, DictionaryUsage, Layered, LoadDictionaryError, LookupStrategy,
+        SingleDictionaryLoader, Trie, UpdateDictionaryError, UserDictionaryManager,
     },
     exn::{Exn, ResultExt},
     input::{KeyState, KeyboardEvent, keysym::*},
@@ -341,6 +341,13 @@ impl Editor {
     }
     pub fn user_dict(&mut self) -> &mut dyn Dictionary {
         self.shared.dict.user_dict()
+    }
+    pub fn load_custom_dict(&mut self, path: &std::path::Path) -> Result<(), LoadDictionaryError> {
+        let loader = SingleDictionaryLoader::new();
+        let mut dict = loader.guess_format_and_load(&path.to_path_buf())?;
+        dict.set_usage(DictionaryUsage::Custom);
+        self.shared.dict.set_custom_dict(dict);
+        Ok(())
     }
     pub fn learn_phrase(
         &mut self,

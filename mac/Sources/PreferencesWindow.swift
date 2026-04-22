@@ -192,4 +192,5 @@ class PreferencesWindow: NSWindow {
 
 extension Notification.Name {
     static let qbopomofoPreferencesChanged = Notification.Name("org.qbopomofo.preferencesChanged")
+    static let qbopomofoReloadCustomDict = Notification.Name("org.qbopomofo.reloadCustomDict")
 }

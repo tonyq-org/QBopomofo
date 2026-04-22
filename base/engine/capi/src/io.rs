@@ -243,6 +243,39 @@ pub unsafe extern "C" fn chewing_get_defaultDictionaryNames() -> *const c_char {
     c"word.dat,tsi.dat,chewing.dat,chewing-deleted.dat".as_ptr()
 }
 
+/// Loads or reloads a custom dictionary overlay from the given file path.
+///
+/// Can be called at any time to hot-reload custom phrases without restarting.
+/// Returns 0 on success, -1 on failure.
+///
+/// # Safety
+///
+/// This function should be called with valid pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chewing_load_custom_dict(
+    ctx: *mut ChewingContext,
+    path: *const c_char,
+) -> c_int {
+    let ctx = match unsafe { ctx.as_mut() } {
+        Some(c) => c,
+        None => return -1,
+    };
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    match ctx.editor.load_custom_dict(std::path::Path::new(path_str)) {
+        Ok(_) => {
+            info!("Custom dict loaded from {path_str}");
+            0
+        }
+        Err(e) => {
+            log::error!("Failed to load custom dict: {e}");
+            -1
+        }
+    }
+}
+
 /// Releases the resources used by the given Chewing IM instance.
 ///
 /// # Safety

@@ -285,6 +285,18 @@ struct ChewingContext *chewing_new3(const char *syspath,
 const char *chewing_get_defaultDictionaryNames(void);
 
 /**
+ * Loads or reloads a custom dictionary overlay from the given file path.
+ *
+ * Can be called at any time to hot-reload custom phrases without restarting.
+ * Returns 0 on success, -1 on failure.
+ *
+ * # Safety
+ *
+ * This function should be called with valid pointers.
+ */
+int chewing_load_custom_dict(struct ChewingContext *ctx, const char *path);
+
+/**
  * Releases the resources used by the given Chewing IM instance.
  *
  * # Safety

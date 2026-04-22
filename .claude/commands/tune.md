@@ -38,11 +38,23 @@
 - 在檔案末尾新增條目，格式：`詞,詞頻,注音1 注音2 ...`
 - 每行加上 `# 備註` 說明調整原因
 
-### 5. 重建 & 測試
+### 5. 熱更新 & 測試
+
+執行 hot-reload 腳本（不需要重新安裝）：
 ```bash
-source "$HOME/.cargo/env" && ./data-provider/build.sh
+./mac/update-phrases.sh
 ```
-建議使用者用 TestApp 測試：
+
+這個腳本會：
+1. 從 `phrases.csv` 重建 `custom.dat`（只需幾秒）
+2. 複製到 `~/Library/Application Support/QBopomofo/`
+3. 送 SIGUSR1 給輸入法，立即生效
+
+**不需要** `install.sh`，也不需要重啟輸入法。
+
+若輸入法未在執行，下次啟動時會自動載入 custom.dat。
+
+建議直接在文字輸入區測試，或用 TestApp：
 ```bash
 cd mac/TestApp && swift run
 ```
