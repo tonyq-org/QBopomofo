@@ -50,7 +50,6 @@ use crate::{
 pub struct Layered {
     dicts: Vec<Box<dyn Dictionary>>,
     user_dict_index: usize,
-    custom_dict_index: Option<usize>,
 }
 
 impl Layered {
@@ -70,15 +69,6 @@ impl Layered {
         Layered {
             dicts,
             user_dict_index,
-            custom_dict_index: None,
-        }
-    }
-    pub fn set_custom_dict(&mut self, dict: Box<dyn Dictionary>) {
-        if let Some(idx) = self.custom_dict_index {
-            self.dicts[idx] = dict;
-        } else {
-            self.dicts.push(dict);
-            self.custom_dict_index = Some(self.dicts.len() - 1);
         }
     }
     pub fn user_dict(&mut self) -> &mut dyn Dictionary {
