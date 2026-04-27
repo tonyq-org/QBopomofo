@@ -3,11 +3,46 @@ import InputMethodKit
 
 private let kConnectionName = "org.qbopomofo.inputmethod.QBopomofo_Connection"
 
+private func inputSourceProperty(_ source: TISInputSource, _ key: CFString) -> AnyObject? {
+    guard let pointer = TISGetInputSourceProperty(source, key) else {
+        return nil
+    }
+    return Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue()
+}
+
+private func enableAndSelectInputMode(for bundleID: String) {
+    guard let sources = TISCreateInputSourceList(nil, true)?.takeRetainedValue() as? [TISInputSource] else {
+        NSLog("QBopomofo: Unable to enumerate input sources.")
+        return
+    }
+
+    let inputMode = sources.first { source in
+        let sourceBundleID = inputSourceProperty(source, kTISPropertyBundleID) as? String
+        let sourceType = inputSourceProperty(source, kTISPropertyInputSourceType) as? String
+        let isSelectable = inputSourceProperty(source, kTISPropertyInputSourceIsSelectCapable) as? Bool ?? false
+        return sourceBundleID == bundleID
+            && sourceType == (kTISTypeKeyboardInputMode as String)
+            && isSelectable
+    }
+
+    guard let inputMode else {
+        NSLog("QBopomofo: Registered bundle, but no selectable input mode was found.")
+        return
+    }
+
+    let enableStatus = TISEnableInputSource(inputMode)
+    let selectStatus = TISSelectInputSource(inputMode)
+    NSLog("QBopomofo: Input mode enable status \(enableStatus), select status \(selectStatus).")
+}
+
 // Install mode: register input source with macOS
 if CommandLine.arguments.count > 1 && CommandLine.arguments[1] == "install" {
     let bundleURL = Bundle.main.bundleURL
     TISRegisterInputSource(bundleURL as CFURL)
     NSLog("QBopomofo: Input source registered from \(bundleURL.path)")
+    if let bundleID = Bundle.main.bundleIdentifier {
+        enableAndSelectInputMode(for: bundleID)
+    }
     exit(0)
 }
 
