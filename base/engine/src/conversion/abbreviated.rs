@@ -15,12 +15,10 @@ pub struct AbbreviatedChewingEngine {
 impl AbbreviatedChewingEngine {
     /// Creates a new abbreviated conversion engine.
     pub fn new() -> AbbreviatedChewingEngine {
-        AbbreviatedChewingEngine {
-            inner: ChewingEngine {
-                lookup_strategy: LookupStrategy::FuzzyPartialPrefix,
-                abbreviated_mode: true,
-            },
-        }
+        let mut inner = ChewingEngine::new();
+        inner.lookup_strategy = LookupStrategy::FuzzyPartialPrefix;
+        inner.abbreviated_mode = true;
+        AbbreviatedChewingEngine { inner }
     }
 }
 

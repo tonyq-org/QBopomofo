@@ -10,12 +10,10 @@ pub struct FuzzyChewingEngine {
 impl FuzzyChewingEngine {
     /// Creates a new conversion engine.
     pub fn new() -> FuzzyChewingEngine {
-        FuzzyChewingEngine {
-            inner: ChewingEngine {
-                lookup_strategy: LookupStrategy::FuzzyPartialPrefix,
-                abbreviated_mode: false,
-            },
-        }
+        let mut inner = ChewingEngine::new();
+        inner.lookup_strategy = LookupStrategy::FuzzyPartialPrefix;
+        inner.abbreviated_mode = false;
+        FuzzyChewingEngine { inner }
     }
 }
 

@@ -5,7 +5,9 @@ use std::{
 
 use log::trace;
 
-use super::{Composition, ConversionEngine, Gap, Interval, Outcome, Symbol};
+use super::{
+    Composition, ConversionEngine, Gap, Interval, Outcome, Symbol, pattern::PatternReranker,
+};
 use crate::{
     dictionary::{Dictionary, LookupStrategy, Phrase},
     zhuyin::Syllable,
@@ -16,6 +18,7 @@ use crate::{
 pub struct ChewingEngine {
     pub(crate) lookup_strategy: LookupStrategy,
     pub(crate) abbreviated_mode: bool,
+    pattern_reranker: PatternReranker,
 }
 
 impl ChewingEngine {
@@ -25,6 +28,7 @@ impl ChewingEngine {
         ChewingEngine {
             lookup_strategy: LookupStrategy::Standard,
             abbreviated_mode: false,
+            pattern_reranker: PatternReranker::default(),
         }
     }
     pub(crate) fn convert<'a>(
@@ -41,16 +45,20 @@ impl ChewingEngine {
                 return vec![Outcome::default()];
             }
             let mut paths = self.find_k_paths(Self::MAX_OUT_PATHS, comp.len(), edges, &phrases);
+            for path in &mut paths {
+                path.pattern_bonus = path.pattern_score(&self.pattern_reranker);
+            }
             trace!("paths: {:#?}", paths);
             debug_assert!(!paths.is_empty());
 
-            // TODO: Reranking
             paths.sort_by(|a, b| b.cmp(a));
             if log::log_enabled!(log::Level::Debug) && paths.len() >= 2 {
                 log::debug!(
                     "path ranking: #1 {} (score={:.4}) #2 {} (score={:.4})",
-                    paths[0], paths[0].total_probability(),
-                    paths[1], paths[1].total_probability(),
+                    paths[0],
+                    paths[0].total_probability(),
+                    paths[1],
+                    paths[1].total_probability(),
                 );
             }
             paths
@@ -231,20 +239,24 @@ impl ChewingEngine {
                 match p {
                     PossiblePhrase::Symbol(c) => format!("'{c}'(symbol)"),
                     PossiblePhrase::Phrase(ph, _) => {
-                        format!("{}(freq={}, score={:.4})", ph.as_str(), ph.freq(), p.log_prob())
+                        format!(
+                            "{}(freq={}, score={:.4})",
+                            ph.as_str(),
+                            ph.freq(),
+                            p.log_prob()
+                        )
                     }
                 }
             };
             if phrases.len() >= 2 {
                 log::debug!(
                     "candidates for {:?}: #1 {} #2 {}",
-                    syllables, desc(&phrases[0]), desc(&phrases[1]),
+                    syllables,
+                    desc(&phrases[0]),
+                    desc(&phrases[1]),
                 );
             } else {
-                log::debug!(
-                    "candidates for {:?}: #1 {}",
-                    syllables, desc(&phrases[0]),
-                );
+                log::debug!("candidates for {:?}: #1 {}", syllables, desc(&phrases[0]),);
             }
         }
         phrases
@@ -340,7 +352,10 @@ impl ChewingEngine {
                     })
                     .collect()
             })
-            .map(|intervals| PossiblePath { intervals })
+            .map(|intervals| PossiblePath {
+                intervals,
+                pattern_bonus: 0.0,
+            })
             .collect()
     }
 
@@ -501,12 +516,14 @@ impl From<PossibleInterval> for Interval {
 #[derive(Default, Clone)]
 struct PossiblePath {
     intervals: Vec<PossibleInterval>,
+    pattern_bonus: f64,
 }
 
 impl Debug for PossiblePath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PossiblePath")
             .field("total_probability()", &self.total_probability())
+            .field("pattern_bonus", &self.pattern_bonus)
             .field("intervals", &self.intervals)
             .finish()
     }
@@ -514,12 +531,24 @@ impl Debug for PossiblePath {
 
 impl PossiblePath {
     fn total_probability(&self) -> f64 {
-        let prob = self.phrase_log_probability();
+        let prob = self.phrase_log_probability() + self.pattern_bonus;
         debug_assert!(!prob.is_nan());
         prob
     }
     fn phrase_log_probability(&self) -> f64 {
         self.intervals.iter().map(|it| it.phrase.log_prob()).sum()
+    }
+    fn pattern_score(&self, reranker: &PatternReranker) -> f64 {
+        let mut texts = [""; PatternReranker::MAX_TOKENS];
+        let mut len = 0;
+        for interval in self.intervals.iter().take(PatternReranker::MAX_TOKENS) {
+            texts[len] = match &interval.phrase {
+                PossiblePhrase::Symbol(_) => "",
+                PossiblePhrase::Phrase(phrase, _) => phrase.as_str(),
+            };
+            len += 1;
+        }
+        reranker.score(&texts[..len])
     }
 }
 
@@ -785,6 +814,47 @@ mod tests {
                     end: 6,
                     is_phrase: true,
                     text: "代表".into()
+                },
+            ],
+            engine.convert(&dict, &composition)[0].intervals
+        );
+    }
+
+    #[test]
+    fn construction_pattern_reranks_matching_path() {
+        let dict = TrieBuf::from([
+            (vec![syl![IU, EH, TONE4]], vec![("月", 100), ("越", 10)]),
+            (vec![syl![H, A]], vec![("哈", 100)]),
+        ]);
+        let engine = ChewingEngine::new();
+        let mut composition = Composition::new();
+        for sym in [
+            Symbol::from(syl![IU, EH, TONE4]),
+            Symbol::from(syl![H, A]),
+            Symbol::from(syl![IU, EH, TONE4]),
+        ] {
+            composition.push(sym);
+        }
+
+        assert_eq!(
+            vec![
+                Interval {
+                    start: 0,
+                    end: 1,
+                    is_phrase: true,
+                    text: "越".into()
+                },
+                Interval {
+                    start: 1,
+                    end: 2,
+                    is_phrase: true,
+                    text: "哈".into()
+                },
+                Interval {
+                    start: 2,
+                    end: 3,
+                    is_phrase: true,
+                    text: "越".into()
                 },
             ],
             engine.convert(&dict, &composition)[0].intervals
