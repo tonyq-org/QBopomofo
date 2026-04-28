@@ -18,21 +18,18 @@ private func enableAndSelectInputMode(for bundleID: String) {
 
     let inputMode = sources.first { source in
         let sourceBundleID = inputSourceProperty(source, kTISPropertyBundleID) as? String
-        let sourceType = inputSourceProperty(source, kTISPropertyInputSourceType) as? String
         let isSelectable = inputSourceProperty(source, kTISPropertyInputSourceIsSelectCapable) as? Bool ?? false
-        return sourceBundleID == bundleID
-            && sourceType == (kTISTypeKeyboardInputMode as String)
-            && isSelectable
+        return sourceBundleID == bundleID && isSelectable
     }
 
     guard let inputMode else {
-        NSLog("QBopomofo: Registered bundle, but no selectable input mode was found.")
+        NSLog("QBopomofo: Registered bundle, but no selectable input source was found.")
         return
     }
 
     let enableStatus = TISEnableInputSource(inputMode)
     let selectStatus = TISSelectInputSource(inputMode)
-    NSLog("QBopomofo: Input mode enable status \(enableStatus), select status \(selectStatus).")
+    NSLog("QBopomofo: Input source enable status \(enableStatus), select status \(selectStatus).")
 }
 
 // Install mode: register input source with macOS
@@ -52,6 +49,8 @@ let app = NSApplication.shared
 // Register default preferences (auto-learn off by default)
 UserDefaults.standard.register(defaults: [
     "org.qbopomofo.disableAutoLearn": true,
+    "org.qbopomofo.inputTextFallback": true,
+    "org.qbopomofo.shiftMonitorEnabled": true,
 ])
 
 // Initialize the input method server

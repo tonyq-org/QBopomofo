@@ -1,4 +1,5 @@
 import Cocoa
+import ApplicationServices
 
 /// QBopomofo 偏好設定視窗
 class PreferencesWindow: NSWindow {
@@ -7,7 +8,7 @@ class PreferencesWindow: NSWindow {
 
     private init() {
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 400, height: 442),
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 502),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -19,9 +20,9 @@ class PreferencesWindow: NSWindow {
     }
 
     private func setupUI() {
-        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 442))
+        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 502))
 
-        var y = 392
+        var y = 452
 
         // Title
         let titleLabel = NSTextField(labelWithString: "Q注音 設定")
@@ -127,6 +128,20 @@ class PreferencesWindow: NSWindow {
         logCheck.frame = NSRect(x: 20, y: y, width: 360, height: 22)
         logCheck.state = UserDefaults.standard.bool(forKey: "org.qbopomofo.persistentLog") ? .on : .off
         contentView.addSubview(logCheck)
+        y -= 30
+
+        // inputText fallback (compatibility for terminals/apps that don't dispatch raw NSEvents)
+        let fallbackCheck = NSButton(checkboxWithTitle: "啟用 inputText 替代輸入路徑（提高終端機相容性）", target: self, action: #selector(inputTextFallbackChanged(_:)))
+        fallbackCheck.frame = NSRect(x: 20, y: y, width: 360, height: 22)
+        fallbackCheck.state = UserDefaults.standard.bool(forKey: "org.qbopomofo.inputTextFallback") ? .on : .off
+        contentView.addSubview(fallbackCheck)
+        y -= 30
+
+        // Global Shift monitor (Accessibility-based; required for Shift-tap toggle in Electron/Chromium apps)
+        let shiftMonitorCheck = NSButton(checkboxWithTitle: "全域監聽 Shift 鍵切換英文模式（需輔助使用權限）", target: self, action: #selector(shiftMonitorChanged(_:)))
+        shiftMonitorCheck.frame = NSRect(x: 20, y: y, width: 360, height: 22)
+        shiftMonitorCheck.state = UserDefaults.standard.bool(forKey: "org.qbopomofo.shiftMonitorEnabled") ? .on : .off
+        contentView.addSubview(shiftMonitorCheck)
         y -= 50
 
         // Version info
@@ -182,6 +197,21 @@ class PreferencesWindow: NSWindow {
 
     @objc private func persistentLogChanged(_ sender: NSButton) {
         UserDefaults.standard.set(sender.state == .on, forKey: "org.qbopomofo.persistentLog")
+    }
+
+    @objc private func inputTextFallbackChanged(_ sender: NSButton) {
+        UserDefaults.standard.set(sender.state == .on, forKey: "org.qbopomofo.inputTextFallback")
+    }
+
+    @objc private func shiftMonitorChanged(_ sender: NSButton) {
+        let enabled = sender.state == .on
+        UserDefaults.standard.set(enabled, forKey: "org.qbopomofo.shiftMonitorEnabled")
+        if enabled {
+            // Triggers the system Accessibility prompt the first time
+            let opts: NSDictionary = ["AXTrustedCheckOptionPrompt": true]
+            _ = AXIsProcessTrustedWithOptions(opts as CFDictionary)
+        }
+        NotificationCenter.default.post(name: .qbopomofoPreferencesChanged, object: nil)
     }
 
     func showWindow() {

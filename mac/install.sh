@@ -49,12 +49,12 @@ echo "→ Registering input source..."
 # Step 5: Launch — we are the only instance
 if [ "$DEBUG" -eq 1 ]; then
     echo "→ Launching in debug mode (log: /tmp/qbopomofo.log)..."
-    QBOPOMOFO_DEBUG=1 "$INSTALL_PATH/Contents/MacOS/$APP_NAME" >> /tmp/qbopomofo.log 2>&1 &
+    nohup env QBOPOMOFO_DEBUG=1 "$INSTALL_PATH/Contents/MacOS/$APP_NAME" >> /tmp/qbopomofo.log 2>&1 &
     echo "  PID: $!"
     echo "  tail -f /tmp/qbopomofo.log"
 else
     echo "→ Launching..."
-    "$INSTALL_PATH/Contents/MacOS/$APP_NAME" &
+    nohup "$INSTALL_PATH/Contents/MacOS/$APP_NAME" >/dev/null 2>&1 &
 fi
 
 echo ""
