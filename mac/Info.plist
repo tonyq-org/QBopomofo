@@ -33,38 +33,22 @@
 	<string>org.qbopomofo.inputmethod.QBopomofo_Connection</string>
 	<key>InputMethodServerControllerClass</key>
 	<string>QBopomofoInputController</string>
+	<key>InputMethodServerDelegateClass</key>
+	<string>QBopomofoInputController</string>
 	<key>TISInputSourceID</key>
 	<string>org.qbopomofo.inputmethod.QBopomofo</string>
+	<key>TISIntendedLanguage</key>
+	<string>zh-Hant</string>
+	<key>tsInputMethodCharacterRepertoireKey</key>
+	<array>
+		<string>Hant</string>
+		<string>Hans</string>
+	</array>
+	<key>tsInputMethodIconFileKey</key>
+	<string>QBopomofo.tiff</string>
+	<key>tsInputMethodAlternateIconFileKey</key>
+	<string>QBopomofo.tiff</string>
 	<key>TICapsLockLanguageSwitchCapable</key>
 	<true/>
-	<key>ComponentInputModeDict</key>
-	<dict>
-		<key>tsInputModeListKey</key>
-		<dict>
-			<key>org.qbopomofo.inputmethod.QBopomofo.Bopomofo</key>
-			<dict>
-				<key>TISIntendedLanguage</key>
-				<string>zh-Hant</string>
-				<key>tsInputModeScriptKey</key>
-				<string>smUnicodeScript</string>
-				<key>tsInputModeIsVisibleKey</key>
-				<true/>
-				<key>tsInputModeMenuIconFileKey</key>
-				<string>QBopomofo</string>
-				<key>tsInputModeAlternateMenuIconFileKey</key>
-				<string>QBopomofo</string>
-				<key>tsInputModePrimaryInScriptKey</key>
-				<true/>
-				<key>tsInputModeDefaultStateKey</key>
-				<true/>
-				<key>tsInputModeLocalizedInputSourceName</key>
-				<string>Q注音</string>
-			</dict>
-		</dict>
-		<key>tsVisibleInputModeOrderedArrayKey</key>
-		<array>
-			<string>org.qbopomofo.inputmethod.QBopomofo.Bopomofo</string>
-		</array>
-	</dict>
 </dict>
 </plist>

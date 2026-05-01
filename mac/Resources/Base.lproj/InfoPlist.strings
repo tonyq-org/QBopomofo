@@ -1,4 +1,3 @@
 /* Input method display name */
 "CFBundleDisplayName" = "QBopomofo";
 "CFBundleName" = "QBopomofo";
-"org.qbopomofo.inputmethod.QBopomofo.Bopomofo" = "Q注音";

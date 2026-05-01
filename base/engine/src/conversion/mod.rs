@@ -15,6 +15,7 @@ use crate::{dictionary::Dictionary, zhuyin::Syllable};
 mod abbreviated;
 mod chewing;
 mod fuzzy;
+mod pattern;
 mod simple;
 mod symbol;
 

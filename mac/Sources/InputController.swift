@@ -79,6 +79,11 @@ class QBopomofoInputController: IMKInputController {
     /// 選字鍵（從偏好設定載入）
     private var selectionKeys: [Character] = Array("1234567890")
 
+    /// Global flagsChanged monitor — only way to detect standalone Shift on modern macOS
+    /// (modern IMK no longer delivers flagsChanged through handle:client:). Requires Accessibility permission.
+    nonisolated(unsafe) private static var shiftMonitor: Any?
+    nonisolated(unsafe) private static weak var activeController: QBopomofoInputController?
+
     // MARK: - Lifecycle
 
     override init!(server: IMKServer!, delegate: Any!, client inputClient: Any!) {
@@ -120,13 +125,44 @@ class QBopomofoInputController: IMKInputController {
     override func activateServer(_ sender: Any!) {
         currentClient = sender as? IMKTextInput
         if chewingContext == nil { initializeEngine() }
+        QBopomofoInputController.activeController = self
+        QBopomofoInputController.ensureShiftMonitor()
         dbg("Server activated")
     }
 
     override func deactivateServer(_ sender: Any!) {
+        if QBopomofoInputController.activeController === self {
+            QBopomofoInputController.activeController = nil
+        }
         commitComposition(sender)
         currentClient = nil
         dbg("Server deactivated")
+    }
+
+    private static func ensureShiftMonitor() {
+        guard shiftMonitor == nil else { return }
+        guard UserDefaults.standard.bool(forKey: "org.qbopomofo.shiftMonitorEnabled") else { return }
+        shiftMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { event in
+            let isShift = event.modifierFlags.contains(.shift)
+            DispatchQueue.main.async {
+                QBopomofoInputController.activeController?.handleGlobalShiftChange(isShift: isShift)
+            }
+        }
+    }
+
+    fileprivate func handleGlobalShiftChange(isShift: Bool) {
+        guard let ctx = chewingContext, let session = composingSession, let client = currentClient else { return }
+        let chineseBuf = getChewingBuffer(ctx)
+        let changed = chineseBuf.withCString { cStr in
+            qb_composing_handle_shift(session, isShift ? 1 : 0, cStr)
+        }
+        dbg("globalShift isShift=\(isShift) changed=\(changed)")
+        if changed != 0 {
+            if qb_composing_is_english(session) != 0 {
+                chewing_clean_bopomofo_buf(ctx)
+            }
+            updateClientDisplay(ctx: ctx, session: session, client: client)
+        }
     }
 
     // MARK: - Preferences
@@ -208,17 +244,73 @@ class QBopomofoInputController: IMKInputController {
         return Int(events.rawValue)
     }
 
+    /// Fallback path for apps (notably Chromium/Electron) that don't dispatch raw NSEvents to handle:client:.
+    /// Synthesises a keyDown NSEvent and delegates to the same logic.
+    /// Standalone Shift taps cannot be detected here — Chromium's modern IMK path doesn't deliver flagsChanged.
+    /// We bracket the keyDown with synthetic shift-down/up so SmartToggle's "Shift + letter = English" still works.
+    override func inputText(_ string: String!, key keyCode: Int, modifiers flags: Int, client sender: Any!) -> Bool {
+        guard UserDefaults.standard.bool(forKey: "org.qbopomofo.inputTextFallback") else {
+            return false
+        }
+        let modifierFlags = NSEvent.ModifierFlags(rawValue: UInt(flags))
+        let chars = string ?? ""
+        let hasShift = modifierFlags.contains(.shift)
+
+        if hasShift, let shiftDown = NSEvent.keyEvent(
+            with: .flagsChanged, location: .zero, modifierFlags: modifierFlags,
+            timestamp: 0, windowNumber: 0, context: nil,
+            characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 0
+        ) {
+            _ = handle(shiftDown, client: sender)
+        }
+
+        guard let synthetic = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: modifierFlags,
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: chars,
+            charactersIgnoringModifiers: chars,
+            isARepeat: false,
+            keyCode: UInt16(keyCode)
+        ) else {
+            return false
+        }
+        let handled = handle(synthetic, client: sender)
+
+        if hasShift, let shiftUp = NSEvent.keyEvent(
+            with: .flagsChanged, location: .zero,
+            modifierFlags: modifierFlags.subtracting(.shift),
+            timestamp: 0, windowNumber: 0, context: nil,
+            characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 0
+        ) {
+            _ = handle(shiftUp, client: sender)
+        }
+
+        return handled
+    }
+
     override func handle(_ event: NSEvent!, client sender: Any!) -> Bool {
+        if kPersistentLog {
+            let typeRaw = event?.type.rawValue ?? 0
+            dbg("handle enter type=\(typeRaw) sender=\(String(describing: type(of: sender)))")
+        }
         guard let event = event else { return false }
         guard let ctx = chewingContext, let session = composingSession else {
             dbg("handle called but engine not initialized")
             return false
         }
-        guard let client = sender as? IMKTextInput else { return false }
+        guard let client = (sender as? IMKTextInput) ?? currentClient else {
+            dbg("handle called but sender is not IMKTextInput: \(String(describing: type(of: sender)))")
+            return false
+        }
 
         // Handle Shift key press/release (flagsChanged)
         if event.type == .flagsChanged {
             let isShift = event.modifierFlags.contains(.shift)
+            dbg("flagsChanged isShift=\(isShift)")
             let chineseBuf = getChewingBuffer(ctx)
             let changed = chineseBuf.withCString { cStr in
                 qb_composing_handle_shift(session, isShift ? 1 : 0, cStr)
@@ -241,7 +333,8 @@ class QBopomofoInputController: IMKInputController {
         let shift = modifiers.contains(.shift)
 
         let isCandMode = inCandidateMode(ctx)
-        dbg("key=\(keyCode) chars=\(chars) candMode=\(isCandMode)")
+        let capsLock = modifiers.contains(.capsLock)
+        dbg("key=\(keyCode) chars=\(chars) shift=\(shift) caps=\(capsLock) candMode=\(isCandMode)")
 
         // Pass through Command/Control
         if modifiers.contains(.command) || modifiers.contains(.control) { return false }

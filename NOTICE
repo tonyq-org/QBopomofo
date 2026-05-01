@@ -12,6 +12,19 @@ libchewing-data - Dictionary and frequency data
   Source: https://codeberg.org/chewing/libchewing-data
   Location in this repo: data-provider/chewing-data/
 
+moedict-data - 教育部《重編國語辭典（修訂本）》詞條（headword + 注音）
+  Original work: 中華民國教育部《重編國語辭典（修訂本）》
+  Original license: CC BY-ND 3.0 TW (姓名標示-禁止改作 臺灣 3.0)
+  Format conversion (CC0): @kcwu / g0v community
+  Source: https://github.com/g0v/moedict-data
+  Location in this repo: data-provider/custom-data/moedict-phrases.csv
+  Note: Per the MOE's interpretation cited in the source repo's README,
+  the ND restriction applies to modification of the textual content
+  itself; format conversion and reuse of headword lists are permitted.
+  This project extracts only the headword (詞條) and its bopomofo
+  reading — no definitions, examples, or other textual content from
+  the original dictionary is incorporated.
+
 Modifications and additional code in this repository (QBopomofo) are
 Copyright (c) 2026 TonyQ Wang
 License: LGPL-2.1-or-later
