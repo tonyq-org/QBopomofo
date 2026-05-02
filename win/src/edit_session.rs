@@ -86,7 +86,7 @@ impl ITfEditSession_Impl for QBEditSession_Impl {
             EditOp::EndComposition { composition } => {
                 crate::qb_dbg!("DoEditSession: EndComposition");
                 if let Some(comp) = composition {
-                    let _ = unsafe { comp.EndComposition(ec) };
+                    clear_and_end_composition(ec, &comp)?;
                 }
                 *self.result.borrow_mut() = Some(EditResult::Composition(None, None));
             }
@@ -140,9 +140,11 @@ fn do_update_composition(
     let text_w: Vec<u16> = text.encode_utf16().collect();
 
     if text.is_empty() {
-        // End composition if text is empty
+        // Clear then end composition if text is empty. Ending a composition
+        // without clearing its range lets some TSF hosts keep/commit the last
+        // preedit character.
         if let Some(comp) = composition {
-            let _ = unsafe { comp.EndComposition(ec) };
+            clear_and_end_composition(ec, &comp)?;
         }
         return Ok(None);
     }
@@ -179,6 +181,14 @@ fn do_update_composition(
     };
 
     Ok(Some(comp))
+}
+
+fn clear_and_end_composition(ec: u32, comp: &ITfComposition) -> windows::core::Result<()> {
+    let range: ITfRange = unsafe { comp.GetRange()? };
+    let empty = [0u16];
+    unsafe { range.SetText(ec, 0, &empty[..0])? };
+    let _ = unsafe { comp.EndComposition(ec) };
+    Ok(())
 }
 
 fn do_commit_text(
