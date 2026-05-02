@@ -115,3 +115,36 @@ tail -f /tmp/qbopomofo.log
 ```
 
 環境變數 `QBOPOMOFO_DEBUG=1` 啟用 debug log。正式使用時不設此變數，零 I/O 開銷。
+
+## Windows 輸入法部署與開發
+
+### 疊代迴圈（無須 Windows Sandbox）
+
+正式 TIP DLL (`qbopomofo_tip.dll`) 被 `regsvr32` 註冊後，會被所有用 TSF 的應用 load 住 → 改 code 後必須全部殺掉才能覆蓋 DLL，這也是舊流程只能靠 sandbox 的原因。
+
+**新流程**：
+
+| 工具 | 用途 |
+|------|------|
+| `cargo run --bin dev_harness` | 無 COM、無視窗的 CLI；stdin 打 `TYPE 5j/` / `KEY 0x0D` 驗輸入邏輯；設 `CHEWING_PATH` |
+| `win/run-dev.ps1` | 一鍵 build + 跑 `dev_host.exe`。**不是真 TSF host**：直接 link `Controller` + `CandidateWindow`，在 message pump 攔 `WM_KEYDOWN` 餵給 controller，commit 走 `EM_REPLACESEL`、preedit 顯示在標題列、候選用 `CandidateWindow`。驗輸入邏輯 + 候選視窗視覺，無 admin 無 regsvr32 |
+| `win/install.ps1` | 正式 TSF 註冊到系統（HKLM regsvr32）。需要測 TSF edit session / composition lifecycle / 跨 app 行為時用這條 |
+
+### 部署踩坑紀錄
+
+1. **TSF 真 host 需要 admin 才能註冊，所以 dev_host 不走 TSF** — `ITfInputProcessorProfiles::Register` + `ITfCategoryMgr::RegisterCategory` 都寫 HKLM，一般使用者會噴 E_FAIL。即使 CoCreateInstance 能在 HKCU 載到 TIP，`AdviseKeyEventSink` 仍會拒絕非「正在被 TSF 啟動」的 tfClientId → E_INVALIDARG。dev_host 改成直接驅動 `Controller`，把 TSF 那層整個拿掉。真 TSF 整合測試只能用 `install.ps1`。
+2. **`install.ps1` 註冊後 DLL 被鎖** — ctfmon + 所有 TSF 應用會 load 住 DLL，改 code 重 build 要先全部殺掉。這條路徑維持正式部署用，日常開發靠 dev_host 繞過。
+3. **Rust panic 跨 `extern "system"` 是 UB** — 所有 COM method 都要套 `com_method_*!` macro（`panic_guard.rs`），panic 會寫 `%TEMP%\qbopomofo_crash.log` 後回 `E_FAIL` 而不是拖 host 陪葬。
+4. **候選視窗 PaintData magic number** — WndProc 前先驗 `GWLP_USERDATA` 裡的 magic，防 DestroyWindow 後殘留訊息去 deref 野指標。
+5. **HiDPI / 多螢幕 / 深色模式** — `candidate_window.rs` 走 `GetDpiForWindow` + `MonitorFromPoint` + `AppsUseLightTheme` 三件套；改視覺時不要寫死 px。
+
+### Debug 模式
+
+```powershell
+# 開發迴圈（推薦）：
+cd win
+./run-dev.ps1                # debug build + launch dev_host
+# 在彈出的 RichEdit 視窗直接打字測試；關窗回到 terminal 改 code 再跑
+```
+
+`win/src/controller.rs` 是平台無關核心邏輯；`text_service.rs` 只是薄 COM wrapper。單元測試用 `dev_harness` 比對 stdout 事件序列，不需要實機視窗。

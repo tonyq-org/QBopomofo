@@ -10,8 +10,7 @@ use std::sync::OnceLock;
 static DEBUG_ENABLED: OnceLock<bool> = OnceLock::new();
 
 fn is_debug() -> bool {
-    // TODO: change back to env-var check after debugging
-    *DEBUG_ENABLED.get_or_init(|| true)
+    *DEBUG_ENABLED.get_or_init(|| std::env::var("QBOPOMOFO_DEBUG").is_ok())
 }
 
 /// Write a debug log line. No-op if QBOPOMOFO_DEBUG is not set.

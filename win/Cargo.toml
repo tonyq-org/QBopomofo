@@ -13,12 +13,15 @@ log = "0.4"
 windows-core = "0.62"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_System_Com",
     "Win32_System_LibraryLoader",
     "Win32_System_Registry",
+    "Win32_UI_Controls",
     "Win32_UI_HiDpi",
+    "Win32_UI_Input_Ime",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_TextServices",
     "Win32_UI_WindowsAndMessaging",
@@ -26,5 +29,17 @@ windows = { version = "0.62", features = [
 
 [lib]
 name = "qbopomofo_tip"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
+
+[[bin]]
+name = "dev_harness"
+path = "src/bin/dev_harness.rs"
+
+[[bin]]
+name = "dev_host"
+path = "src/bin/dev_host.rs"
+
+[[bin]]
+name = "test_tip"
+path = "src/bin/test_tip.rs"

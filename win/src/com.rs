@@ -15,7 +15,7 @@ use windows::Win32::System::Com::{IClassFactory, IClassFactory_Impl, CLSCTX_INPR
 use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
 use windows::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW, HKEY, HKEY_CLASSES_ROOT,
-    KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
+    HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::HKL;
 use windows::Win32::UI::TextServices::{
@@ -71,22 +71,26 @@ unsafe extern "system" fn DllMain(
     reason: u32,
     _reserved: *mut std::ffi::c_void,
 ) -> BOOL {
-    if reason == 1 {
-        unsafe { DLL_INSTANCE = hinst };
-        // Install panic hook to write crashes to log file
-        std::panic::set_hook(Box::new(|info| {
-            let path = std::env::temp_dir().join("qbopomofo_crash.log");
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-            {
-                use std::io::Write;
-                let _ = writeln!(f, "PANIC: {}", info);
-            }
-        }));
-    }
-    BOOL(1)
+    crate::com_method_win_bool!("DllMain", {
+        if reason == 1 {
+            unsafe { DLL_INSTANCE = hinst };
+            // Install panic hook to log panics before they propagate to
+            // panic_guard. The hook is best-effort — it may or may not run
+            // depending on panic strategy; panic_guard is the real safety net.
+            std::panic::set_hook(Box::new(|info| {
+                let path = std::env::temp_dir().join("qbopomofo_crash.log");
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                {
+                    use std::io::Write;
+                    let _ = writeln!(f, "PANIC: {}", info);
+                }
+            }));
+        }
+        BOOL(1)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -99,37 +103,48 @@ unsafe extern "system" fn DllGetClassObject(
     riid: *const GUID,
     ppv: *mut *mut std::ffi::c_void,
 ) -> HRESULT {
-    let rclsid = unsafe { &*rclsid };
-    if ppv.is_null() {
-        return E_NOINTERFACE;
-    }
-    unsafe { *ppv = std::ptr::null_mut() };
-    if *rclsid != CLSID_QBOPOMOFO {
-        return CLASS_E_CLASSNOTAVAILABLE;
-    }
-    let factory: IClassFactory = QBopomofoClassFactory.into();
-    unsafe { factory.query(riid, ppv) }
+    crate::com_method_hresult!("DllGetClassObject", {
+        if ppv.is_null() {
+            return E_NOINTERFACE;
+        }
+        unsafe { *ppv = std::ptr::null_mut() };
+        if rclsid.is_null() {
+            return E_NOINTERFACE;
+        }
+        let rclsid = unsafe { &*rclsid };
+        if *rclsid != CLSID_QBOPOMOFO {
+            return CLASS_E_CLASSNOTAVAILABLE;
+        }
+        let factory: IClassFactory = QBopomofoClassFactory.into();
+        unsafe { factory.query(riid, ppv) }
+    })
 }
 
 #[unsafe(no_mangle)]
 extern "system" fn DllCanUnloadNow() -> HRESULT {
-    if DLL_REF_COUNT.load(Ordering::SeqCst) == 0 { S_OK } else { S_FALSE }
+    crate::com_method_hresult!("DllCanUnloadNow", {
+        if DLL_REF_COUNT.load(Ordering::SeqCst) == 0 { S_OK } else { S_FALSE }
+    })
 }
 
 #[unsafe(no_mangle)]
 unsafe extern "system" fn DllRegisterServer() -> HRESULT {
-    match register_server() {
-        Ok(()) => S_OK,
-        Err(e) => e.into(),
-    }
+    crate::com_method_hresult!("DllRegisterServer", {
+        match register_server() {
+            Ok(()) => S_OK,
+            Err(e) => e.into(),
+        }
+    })
 }
 
 #[unsafe(no_mangle)]
 unsafe extern "system" fn DllUnregisterServer() -> HRESULT {
-    match unregister_server() {
-        Ok(()) => S_OK,
-        Err(e) => e.into(),
-    }
+    crate::com_method_hresult!("DllUnregisterServer", {
+        match unregister_server() {
+            Ok(()) => S_OK,
+            Err(e) => e.into(),
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -146,19 +161,26 @@ impl IClassFactory_Impl for QBopomofoClassFactory_Impl {
         riid: *const GUID,
         ppvobject: *mut *mut std::ffi::c_void,
     ) -> windows::core::Result<()> {
-        unsafe { *ppvobject = std::ptr::null_mut() };
-        let service = QBopomofoTextService::new();
-        let unknown: IUnknown = service.into();
-        unsafe { unknown.query(riid, ppvobject).ok() }
+        crate::com_method_unit!("CreateInstance", {
+            if ppvobject.is_null() {
+                return Err(windows::core::Error::from(E_NOINTERFACE));
+            }
+            unsafe { *ppvobject = std::ptr::null_mut() };
+            let service = QBopomofoTextService::new();
+            let unknown: IUnknown = service.into();
+            unsafe { unknown.query(riid, ppvobject).ok() }
+        })
     }
 
     fn LockServer(&self, flock: BOOL) -> windows::core::Result<()> {
-        if flock.as_bool() {
-            DLL_REF_COUNT.fetch_add(1, Ordering::SeqCst);
-        } else {
-            DLL_REF_COUNT.fetch_sub(1, Ordering::SeqCst);
-        }
-        Ok(())
+        crate::com_method_unit!("LockServer", {
+            if flock.as_bool() {
+                DLL_REF_COUNT.fetch_add(1, Ordering::SeqCst);
+            } else {
+                DLL_REF_COUNT.fetch_sub(1, Ordering::SeqCst);
+            }
+            Ok(())
+        })
     }
 }
 
@@ -198,27 +220,55 @@ fn clsid_string() -> String {
 }
 
 fn register_server() -> windows::core::Result<()> {
+    crate::qb_dbg!("DllRegisterServer: start");
     let dll_path = get_dll_path()?;
+    crate::qb_dbg!("DllRegisterServer: dll_path={}", dll_path);
     register_com_server(&dll_path)?;
+    crate::qb_dbg!("DllRegisterServer: COM server registered");
     register_tsf_category()?;
+    crate::qb_dbg!("DllRegisterServer: TSF category registered");
     register_tsf_profile()?;
+    crate::qb_dbg!("DllRegisterServer: TSF profile registered");
     Ok(())
 }
 
 fn unregister_server() -> windows::core::Result<()> {
+    crate::qb_dbg!("DllUnregisterServer: start");
     let _ = unregister_tsf_category();
     let _ = unregister_tsf_profile();
     let _ = unregister_com_server();
+    crate::qb_dbg!("DllUnregisterServer: done");
     Ok(())
 }
 
 fn register_com_server(dll_path: &str) -> windows::core::Result<()> {
-    let key_path = to_wide_null(&format!("CLSID\\{}\\InprocServer32", clsid_string()));
+    write_inproc_server(HKEY_CLASSES_ROOT, "", dll_path)
+}
+
+fn unregister_com_server() -> windows::core::Result<()> {
+    let key_path = to_wide_null(&format!("CLSID\\{}", clsid_string()));
+    unsafe { let _ = RegDeleteTreeW(HKEY_CLASSES_ROOT, PCWSTR(key_path.as_ptr())); }
+    Ok(())
+}
+
+/// Write `InprocServer32` under a registry root. `prefix` is prepended to
+/// `CLSID\{GUID}\InprocServer32`; pass `"Software\\Classes\\"` for HKCU
+/// per-user registration.
+fn write_inproc_server(
+    root: HKEY,
+    prefix: &str,
+    dll_path: &str,
+) -> windows::core::Result<()> {
+    let key_path = to_wide_null(&format!(
+        "{}CLSID\\{}\\InprocServer32",
+        prefix,
+        clsid_string()
+    ));
     let mut hkey = HKEY::default();
 
     win32_ok(unsafe {
         RegCreateKeyExW(
-            HKEY_CLASSES_ROOT,
+            root,
             PCWSTR(key_path.as_ptr()),
             Some(0),
             None,
@@ -230,7 +280,6 @@ fn register_com_server(dll_path: &str) -> windows::core::Result<()> {
         )
     })?;
 
-    // Default value = DLL path
     let dll_path_w = to_wide_null(dll_path);
     win32_ok(unsafe {
         RegSetValueExW(
@@ -245,7 +294,6 @@ fn register_com_server(dll_path: &str) -> windows::core::Result<()> {
         )
     })?;
 
-    // ThreadingModel = Apartment
     let name = to_wide_null("ThreadingModel");
     let value = to_wide_null("Apartment");
     win32_ok(unsafe {
@@ -265,13 +313,36 @@ fn register_com_server(dll_path: &str) -> windows::core::Result<()> {
     Ok(())
 }
 
-fn unregister_com_server() -> windows::core::Result<()> {
-    let key_path = to_wide_null(&format!("CLSID\\{}", clsid_string()));
-    unsafe { let _ = RegDeleteTreeW(HKEY_CLASSES_ROOT, PCWSTR(key_path.as_ptr())); }
+/// Register just the COM CLSID → DLL mapping in HKCU so `CoCreateInstance` can
+/// load our TIP class. **Does NOT** touch TSF category/profile registration —
+/// those APIs write HKLM and require admin; `dev_host` bypasses them by
+/// manually instantiating + activating the TIP in-process.
+///
+/// Idempotent. No admin required.
+///
+/// Caveat: if HKLM has a stale registration for the same CLSID pointing at a
+/// different DLL, Windows may shadow our HKCU entry with HKLM. Make sure the
+/// DLL is not regsvr32'd via admin before using dev_host.
+pub fn ensure_hkcu_registration(dll_path: &str) -> windows::core::Result<()> {
+    write_inproc_server(HKEY_CURRENT_USER, "Software\\Classes\\", dll_path)
+        .map_err(|e| {
+            eprintln!("[error] write_inproc_server (HKCU) failed: {:?}", e);
+            e
+        })
+}
+
+/// Remove per-user registration written by [`ensure_hkcu_registration`].
+/// Idempotent.
+pub fn remove_hkcu_registration() -> windows::core::Result<()> {
+    let key_path = to_wide_null(&format!("Software\\Classes\\CLSID\\{}", clsid_string()));
+    unsafe {
+        let _ = RegDeleteTreeW(HKEY_CURRENT_USER, PCWSTR(key_path.as_ptr()));
+    }
     Ok(())
 }
 
 fn register_tsf_category() -> windows::core::Result<()> {
+    crate::qb_dbg!("register_tsf_category: CoCreateInstance");
     let cat_mgr: ITfCategoryMgr = unsafe {
         windows::Win32::System::Com::CoCreateInstance(
             &CLSID_TF_CategoryMgr,
@@ -279,6 +350,7 @@ fn register_tsf_category() -> windows::core::Result<()> {
             CLSCTX_INPROC_SERVER,
         )?
     };
+    crate::qb_dbg!("register_tsf_category: RegisterCategory");
     unsafe {
         cat_mgr.RegisterCategory(&CLSID_QBOPOMOFO, &GUID_TFCAT_TIP_KEYBOARD, &CLSID_QBOPOMOFO)?;
     }
@@ -300,11 +372,14 @@ fn unregister_tsf_category() -> windows::core::Result<()> {
 }
 
 fn register_tsf_profile() -> windows::core::Result<()> {
-    let display_name_w: Vec<u16> = DISPLAY_NAME.encode_utf16().collect();
-    let empty: Vec<u16> = Vec::new();
+    let display_name_storage = to_wide_null(DISPLAY_NAME);
+    let display_name_w = &display_name_storage[..display_name_storage.len() - 1];
+    let empty_icon_storage = [0u16];
+    let empty_icon_w = &empty_icon_storage[..0];
 
     // Step 1: Register CLSID + AddLanguageProfile via legacy API
     // (required for Windows to recognize the TIP)
+    crate::qb_dbg!("register_tsf_profile: CoCreateInstance");
     let profiles: ITfInputProcessorProfiles = unsafe {
         windows::Win32::System::Com::CoCreateInstance(
             &CLSID_TF_InputProcessorProfiles,
@@ -313,32 +388,45 @@ fn register_tsf_profile() -> windows::core::Result<()> {
         )?
     };
     unsafe {
-        profiles.Register(&CLSID_QBOPOMOFO)?;
+        crate::qb_dbg!("register_tsf_profile: Register");
+        profiles.Register(&CLSID_QBOPOMOFO).map_err(|e| {
+            eprintln!("[error] profiles.Register failed: {:?} — this API writes to HKLM and needs admin", e);
+            e
+        })?;
+        crate::qb_dbg!("register_tsf_profile: AddLanguageProfile");
         profiles.AddLanguageProfile(
             &CLSID_QBOPOMOFO,
             LANG_ID,
             &GUID_PROFILE,
-            &display_name_w,
-            &empty,
+            display_name_w,
+            empty_icon_w,
             0,
-        )?;
+        ).map_err(|e| {
+            eprintln!("[error] profiles.AddLanguageProfile failed: {:?}", e);
+            e
+        })?;
     }
 
     // Step 2: Also register via the newer ProfileMgr API for Windows 8+
+    crate::qb_dbg!("register_tsf_profile: cast ProfileMgr");
     let profile_mgr: ITfInputProcessorProfileMgr = profiles.cast()?;
     unsafe {
+        crate::qb_dbg!("register_tsf_profile: RegisterProfile");
         profile_mgr.RegisterProfile(
             &CLSID_QBOPOMOFO,
             LANG_ID,
             &GUID_PROFILE,
-            &display_name_w,
-            &empty,
+            display_name_w,
+            empty_icon_w,
             0,
             HKL::default(),
             0,
             true,
             0,
-        )?;
+        ).map_err(|e| {
+            eprintln!("[error] profile_mgr.RegisterProfile failed: {:?}", e);
+            e
+        })?;
     }
     Ok(())
 }

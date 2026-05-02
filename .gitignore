@@ -1,6 +1,9 @@
 # Build output
 data-provider/output/
 target/
+win/out/
+win/target2/
+win/target3/
 
 # IDE
 .idea/

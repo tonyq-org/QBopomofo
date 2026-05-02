@@ -1,25 +1,36 @@
 //! Candidate window for QBopomofo.
 //!
-//! A floating popup window that displays candidate characters for selection.
-//! Uses Win32 API (CreateWindowExW + GDI) for rendering. The window is
-//! WS_POPUP + WS_EX_TOPMOST + WS_EX_TOOLWINDOW + WS_EX_NOACTIVATE so it
-//! floats above all windows, doesn't appear in taskbar, and doesn't steal focus.
+//! A floating popup that displays bopomofo candidates for selection. Visual
+//! goals (aligned with Mac `CandidatePanel.swift`):
+//!   - Multi-monitor aware (`MonitorFromPoint` + `GetMonitorInfoW`).
+//!   - HiDPI scaling (`GetDpiForWindow`) — font size + padding + row height.
+//!   - Light / dark theme following `AppsUseLightTheme`.
+//!   - Rounded corners via `CreateRoundRectRgn` + `SetWindowRgn`.
+//!   - Double-buffered, jitter-free paint (`InvalidateRect` + `UpdateWindow`).
+//!
+//! Safety:
+//!   - `PaintData` is stored behind a raw pointer in `GWLP_USERDATA`. The
+//!     WndProc validates a magic number before dereferencing to guard against
+//!     stale window messages after destruction.
 
 use std::sync::OnceLock;
 
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontIndirectW, DeleteObject, EndPaint, FillRect, GetDC, GetTextExtentPoint32W,
-    ReleaseDC, SelectObject, SetBkMode, SetTextColor, TextOutW, HFONT, LOGFONTW,
-    PAINTSTRUCT, TRANSPARENT,
+    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontIndirectW,
+    CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, EndPaint, FillRect, FrameRect,
+    GetDC, GetMonitorInfoW, GetTextExtentPoint32W, InvalidateRect, MonitorFromPoint, ReleaseDC,
+    SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TextOutW, UpdateWindow, HBITMAP, HBRUSH,
+    HDC, HFONT, LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, SRCCOPY,
+    TRANSPARENT,
 };
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, GetWindowLongPtrW,
-    MoveWindow, RegisterClassExW, SetWindowLongPtrW, ShowWindow,
-    CS_DROPSHADOW, CW_USEDEFAULT, GWLP_USERDATA, HMENU, SM_CXSCREEN, SM_CYSCREEN,
-    SW_HIDE, SW_SHOWNA, WM_PAINT, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, IsWindowVisible,
+    MoveWindow, RegisterClassExW, SetWindowLongPtrW, ShowWindow, CS_DROPSHADOW, CW_USEDEFAULT,
+    GWLP_USERDATA, HMENU, SW_HIDE, SW_SHOWNA, WM_ERASEBKGND, WM_PAINT, WNDCLASSEXW,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::com::dll_instance;
@@ -27,27 +38,148 @@ use crate::com::dll_instance;
 static CLASS_REGISTERED: OnceLock<bool> = OnceLock::new();
 
 const WINDOW_CLASS: &str = "QBopomofo_CandidateWindow";
-const FONT_SIZE: i32 = 20;
-const PADDING: i32 = 8;
-const ROW_HEIGHT: i32 = 28;
-const MIN_WIDTH: i32 = 120;
 
-/// Shared paint data stored on the heap; a raw pointer is placed in GWLP_USERDATA
-/// so the static WndProc can reach it during WM_PAINT.
+/// Base metrics at 96 DPI. Scaled by `dpi / 96` at paint time.
+const BASE_FONT_PT: i32 = 14;
+const BASE_ROW_HEIGHT: i32 = 28;
+const BASE_PADDING: i32 = 8;
+const BASE_MIN_WIDTH: i32 = 140;
+const BASE_CORNER_RADIUS: i32 = 8;
+
+/// Magic number written into `PaintData` so WndProc can reject stale pointers.
+const PAINT_DATA_MAGIC: u32 = 0x51_50_4D_4F; // "QPMO" little-endian-ish
+
+// ---------------------------------------------------------------------------
+// Theme
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+struct Theme {
+    bg: COLORREF,
+    fg: COLORREF,
+    fg_dim: COLORREF,
+    border: COLORREF,
+    highlight_bg: COLORREF,
+    highlight_fg: COLORREF,
+}
+
+impl Theme {
+    fn light() -> Self {
+        Self {
+            bg: COLORREF(0x00F7_F7F7),
+            fg: COLORREF(0x0020_2020),
+            fg_dim: COLORREF(0x0080_8080),
+            border: COLORREF(0x00C0_C0C0),
+            highlight_bg: COLORREF(0x00F0_B070),
+            highlight_fg: COLORREF(0x0020_2020),
+        }
+    }
+
+    fn dark() -> Self {
+        Self {
+            bg: COLORREF(0x0028_2828),
+            fg: COLORREF(0x00F0_F0F0),
+            fg_dim: COLORREF(0x0090_9090),
+            border: COLORREF(0x0040_4040),
+            highlight_bg: COLORREF(0x0080_5020),
+            highlight_fg: COLORREF(0x00FF_FFFF),
+        }
+    }
+
+    fn current() -> Self {
+        if is_dark_mode() { Self::dark() } else { Self::light() }
+    }
+}
+
+fn is_dark_mode() -> bool {
+    // Read HKCU\...\Themes\Personalize\AppsUseLightTheme (DWORD).
+    // 0 = dark, 1 = light. Default to light on read failure.
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
+    };
+    let sub = to_wide_null(
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+    );
+    let name = to_wide_null("AppsUseLightTheme");
+    let mut hkey = HKEY::default();
+    let open = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            PCWSTR(sub.as_ptr()),
+            Some(0),
+            KEY_READ,
+            &mut hkey,
+        )
+    };
+    if open.0 != 0 {
+        return false;
+    }
+    let mut data = [0u8; 4];
+    let mut size = 4u32;
+    let q = unsafe {
+        RegQueryValueExW(
+            hkey,
+            PCWSTR(name.as_ptr()),
+            None,
+            None,
+            Some(data.as_mut_ptr()),
+            Some(&mut size),
+        )
+    };
+    let _ = unsafe { RegCloseKey(hkey) };
+    if q.0 != 0 {
+        return false;
+    }
+    u32::from_le_bytes(data) == 0
+}
+
+// ---------------------------------------------------------------------------
+// Paint data — heap-allocated, raw ptr in GWLP_USERDATA
+// ---------------------------------------------------------------------------
+
 struct PaintData {
+    magic: u32,
     candidates: Vec<String>,
     selection_keys: Vec<char>,
     highlighted: usize,
     page_info: String,
     font: HFONT,
+    dpi: u32,
 }
 
-/// Candidate window state.
+impl PaintData {
+    fn new(dpi: u32) -> Self {
+        Self {
+            magic: PAINT_DATA_MAGIC,
+            candidates: Vec::new(),
+            selection_keys: "1234567890".chars().collect(),
+            highlighted: 0,
+            page_info: String::new(),
+            font: create_font(scale(BASE_FONT_PT, dpi)),
+            dpi,
+        }
+    }
+
+    fn ensure_font(&mut self, new_dpi: u32) {
+        if new_dpi != self.dpi {
+            unsafe { let _ = DeleteObject(self.font.into()); }
+            self.font = create_font(scale(BASE_FONT_PT, new_dpi));
+            self.dpi = new_dpi;
+        }
+    }
+}
+
+fn scale(base: i32, dpi: u32) -> i32 {
+    (base * dpi as i32) / 96
+}
+
+// ---------------------------------------------------------------------------
+// CandidateWindow
+// ---------------------------------------------------------------------------
+
 pub struct CandidateWindow {
     hwnd: HWND,
-    /// Heap-allocated paint data whose raw pointer lives in GWLP_USERDATA.
     paint_data: *mut PaintData,
-    /// Last shown screen position.
     last_pos: (i32, i32),
 }
 
@@ -55,16 +187,9 @@ impl CandidateWindow {
     pub fn new() -> Self {
         ensure_class_registered();
 
-        let font = create_font(FONT_SIZE);
-
-        // Allocate paint data on heap
-        let paint_data = Box::into_raw(Box::new(PaintData {
-            candidates: Vec::new(),
-            selection_keys: "1234567890".chars().collect(),
-            highlighted: 0,
-            page_info: String::new(),
-            font,
-        }));
+        // Initial DPI — we'll refresh per-show in case the window moves
+        // to a different monitor.
+        let paint_data = Box::into_raw(Box::new(PaintData::new(96)));
 
         let hwnd = unsafe {
             let class_w = to_wide_null(WINDOW_CLASS);
@@ -74,161 +199,167 @@ impl CandidateWindow {
                 PCWSTR(class_w.as_ptr()),
                 PCWSTR(title_w.as_ptr()),
                 WS_POPUP,
-                CW_USEDEFAULT, CW_USEDEFAULT, 200, 100,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                200,
+                100,
                 Some(HWND::default()),
                 Some(HMENU::default()),
                 Some(dll_instance().into()),
                 None,
             )
         };
-
         let hwnd = hwnd.unwrap_or_default();
 
-        // Store paint data pointer in GWLP_USERDATA
-        unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, paint_data as isize); }
+        unsafe {
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, paint_data as isize);
+        }
 
-        Self { hwnd, paint_data, last_pos: (100, 100) }
+        Self {
+            hwnd,
+            paint_data,
+            last_pos: (100, 100),
+        }
     }
 
     pub fn set_selection_keys(&mut self, keys: &[char]) {
-        unsafe { (*self.paint_data).selection_keys = keys.to_vec(); }
+        if self.paint_data.is_null() {
+            return;
+        }
+        unsafe { (*self.paint_data).selection_keys = keys.to_vec() };
     }
 
-    /// Update candidates and show the window near the given screen coordinates.
-    pub fn show(&mut self, candidates: &[String], highlighted: usize, page_info: &str, x: i32, y: i32) {
+    pub fn show(
+        &mut self,
+        candidates: &[String],
+        highlighted: usize,
+        page_info: &str,
+        x: i32,
+        y: i32,
+    ) {
+        if self.paint_data.is_null() {
+            return;
+        }
+
+        // Refresh DPI for this monitor & reallocate font if needed.
+        let dpi = current_dpi(self.hwnd);
         unsafe {
-            (*self.paint_data).candidates = candidates.to_vec();
-            (*self.paint_data).highlighted = highlighted;
-            (*self.paint_data).page_info = page_info.to_string();
+            let pd = &mut *self.paint_data;
+            pd.ensure_font(dpi);
+            pd.candidates = candidates.to_vec();
+            pd.highlighted = highlighted.min(candidates.len().saturating_sub(1));
+            pd.page_info = page_info.to_string();
         }
         self.last_pos = (x, y);
 
-        let (w, h) = self.calc_size();
-        let (fx, fy) = clamp_to_screen(x, y + 24, w, h);
+        let (w, h) = self.calc_size(dpi);
+        let (fx, fy) = clamp_to_monitor(x, y + scale(24, dpi), w, h);
+
+        // Apply rounded-corner region.
+        unsafe {
+            let radius = scale(BASE_CORNER_RADIUS, dpi);
+            let rgn = CreateRoundRectRgn(0, 0, w, h, radius, radius);
+            let _ = SetWindowRgn(self.hwnd, Some(rgn), true);
+            // SetWindowRgn takes ownership of rgn — do not DeleteObject it.
+        }
 
         unsafe {
             let _ = MoveWindow(self.hwnd, fx, fy, w, h, true);
             let _ = ShowWindow(self.hwnd, SW_SHOWNA);
-            // Force synchronous repaint — host app's message pump may not
-            // dispatch WM_PAINT to our window promptly. We invalidate then
-            // send WM_PAINT directly via SendMessageW.
-            let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(self.hwnd), None, true);
-            let _ = windows::Win32::UI::WindowsAndMessaging::SendMessageW(
-                self.hwnd, WM_PAINT, Some(WPARAM(0)), Some(LPARAM(0)),
-            );
+            let _ = InvalidateRect(Some(self.hwnd), None, true);
+            let _ = UpdateWindow(self.hwnd);
         }
     }
 
-    /// Hide the candidate window.
     pub fn hide(&self) {
-        unsafe { let _ = ShowWindow(self.hwnd, SW_HIDE); }
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_HIDE);
+        }
     }
 
     #[allow(dead_code)]
     pub fn is_visible(&self) -> bool {
-        unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(self.hwnd).as_bool() }
+        unsafe { IsWindowVisible(self.hwnd).as_bool() }
     }
 
-    pub fn highlighted_index(&self) -> usize {
-        unsafe { (*self.paint_data).highlighted }
-    }
-
-    #[allow(dead_code)]
-    pub fn set_highlighted(&mut self, index: usize) {
-        unsafe { (*self.paint_data).highlighted = index; }
-        self.invalidate();
-    }
-
-    /// Move highlight to next candidate (no wrap).
-    pub fn highlight_next(&mut self) {
-        let pd = unsafe { &mut *self.paint_data };
-        if pd.highlighted + 1 < pd.candidates.len() {
-            pd.highlighted += 1;
-            self.invalidate();
-        }
-    }
-
-    /// Move highlight to previous candidate (no wrap).
-    pub fn highlight_previous(&mut self) {
-        let pd = unsafe { &mut *self.paint_data };
-        if pd.highlighted > 0 {
-            pd.highlighted -= 1;
-            self.invalidate();
-        }
-    }
-
-    /// Number of selection keys configured.
-    pub fn selection_keys_count(&self) -> usize {
-        unsafe { (*self.paint_data).selection_keys.len() }
-    }
-
-    /// Get selection keys as Vec<char>.
-    pub fn get_selection_keys(&self) -> Vec<char> {
-        unsafe { (*self.paint_data).selection_keys.clone() }
-    }
-
-    /// Last shown position (for re-showing without new caret data).
     pub fn last_position(&self) -> (i32, i32) {
         self.last_pos
     }
 
-    fn invalidate(&self) {
-        unsafe {
-            let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(self.hwnd), None, true);
-            let _ = windows::Win32::UI::WindowsAndMessaging::SendMessageW(
-                self.hwnd, WM_PAINT, Some(WPARAM(0)), Some(LPARAM(0)),
-            );
+    fn calc_size(&self, dpi: u32) -> (i32, i32) {
+        if self.paint_data.is_null() {
+            return (scale(BASE_MIN_WIDTH, dpi), scale(BASE_ROW_HEIGHT, dpi));
         }
-    }
-
-    fn calc_size(&self) -> (i32, i32) {
         let pd = unsafe { &*self.paint_data };
         let hdc = unsafe { GetDC(Some(self.hwnd)) };
         let old_font = unsafe { SelectObject(hdc, pd.font.into()) };
 
-        let mut max_w = MIN_WIDTH;
+        let padding = scale(BASE_PADDING, dpi);
+        let row_h = scale(BASE_ROW_HEIGHT, dpi);
+        let min_w = scale(BASE_MIN_WIDTH, dpi);
+
+        let mut max_w = min_w;
         for (i, cand) in pd.candidates.iter().enumerate() {
             let key_ch = pd.selection_keys.get(i).copied().unwrap_or(' ');
             let label = format!("{}. {}", key_ch, cand);
             let label_w: Vec<u16> = label.encode_utf16().collect();
             let mut size = windows::Win32::Foundation::SIZE::default();
-            unsafe { let _ = GetTextExtentPoint32W(hdc, &label_w, &mut size); }
-            let w = size.cx + PADDING * 2;
-            if w > max_w { max_w = w; }
+            unsafe {
+                let _ = GetTextExtentPoint32W(hdc, &label_w, &mut size);
+            }
+            let w = size.cx + padding * 2;
+            if w > max_w {
+                max_w = w;
+            }
         }
 
         if !pd.page_info.is_empty() {
             let info_w: Vec<u16> = pd.page_info.encode_utf16().collect();
             let mut size = windows::Win32::Foundation::SIZE::default();
-            unsafe { let _ = GetTextExtentPoint32W(hdc, &info_w, &mut size); }
-            let w = size.cx + PADDING * 2;
-            if w > max_w { max_w = w; }
+            unsafe {
+                let _ = GetTextExtentPoint32W(hdc, &info_w, &mut size);
+            }
+            let w = size.cx + padding * 2;
+            if w > max_w {
+                max_w = w;
+            }
         }
 
-        unsafe { SelectObject(hdc, old_font); }
-        unsafe { let _ = ReleaseDC(Some(self.hwnd), hdc); }
+        unsafe { SelectObject(hdc, old_font) };
+        unsafe {
+            let _ = ReleaseDC(Some(self.hwnd), hdc);
+        }
 
-        let rows = pd.candidates.len() as i32 + if pd.page_info.is_empty() { 0 } else { 1 };
-        let h = rows * ROW_HEIGHT + PADDING * 2;
+        let extra_row = if pd.page_info.is_empty() { 0 } else { 1 };
+        let rows = pd.candidates.len() as i32 + extra_row;
+        let h = rows * row_h + padding * 2;
         (max_w, h)
+    }
+}
+
+impl Default for CandidateWindow {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl Drop for CandidateWindow {
     fn drop(&mut self) {
         unsafe {
-            // Clear USERDATA before destroying
+            // Clear USERDATA before destroying so any in-flight WM_PAINT
+            // sees null and bails out.
             SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
             let _ = DestroyWindow(self.hwnd);
-            // Reclaim the heap allocation
-            let pd = Box::from_raw(self.paint_data);
-            let _ = DeleteObject(pd.font.into());
+            if !self.paint_data.is_null() {
+                let pd = Box::from_raw(self.paint_data);
+                let _ = DeleteObject(pd.font.into());
+            }
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Window class registration and WndProc
+// Window class + WndProc
 // ---------------------------------------------------------------------------
 
 fn ensure_class_registered() {
@@ -242,7 +373,9 @@ fn ensure_class_registered() {
             lpszClassName: PCWSTR(class_w.as_ptr()),
             ..Default::default()
         };
-        unsafe { RegisterClassExW(&wc); }
+        unsafe {
+            RegisterClassExW(&wc);
+        }
         true
     });
 }
@@ -254,71 +387,121 @@ unsafe extern "system" fn candidate_wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
+        WM_ERASEBKGND => {
+            // We paint the entire client area in WM_PAINT → skip default
+            // background erase to prevent flicker.
+            LRESULT(1)
+        }
         WM_PAINT => {
             let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
-            if ptr != 0 {
-                let pd = unsafe { &*(ptr as *const PaintData) };
-                paint_candidates(hwnd, pd);
-                return LRESULT(0);
+            if ptr == 0 {
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
             }
-            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+            // Validate magic before trusting the pointer.
+            let magic = unsafe { (*(ptr as *const PaintData)).magic };
+            if magic != PAINT_DATA_MAGIC {
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            }
+            let pd = unsafe { &*(ptr as *const PaintData) };
+            paint_candidates(hwnd, pd);
+            LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
 
-/// Paint candidate list using GDI. Called from WndProc during WM_PAINT.
 fn paint_candidates(hwnd: HWND, pd: &PaintData) {
+    let theme = Theme::current();
     let mut ps = PAINTSTRUCT::default();
     let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
 
-    // White background
-    let bg_brush = unsafe {
-        windows::Win32::Graphics::Gdi::CreateSolidBrush(
-            windows::Win32::Foundation::COLORREF(0x00FFFFFF),
-        )
+    // Double-buffer to a memory DC to avoid flicker.
+    let mem_dc = unsafe { CreateCompatibleDC(Some(hdc)) };
+    let client_w = ps.rcPaint.right - ps.rcPaint.left;
+    let client_h = ps.rcPaint.bottom - ps.rcPaint.top;
+    let mem_bmp: HBITMAP = unsafe { CreateCompatibleBitmap(hdc, client_w, client_h) };
+    let old_bmp = unsafe { SelectObject(mem_dc, mem_bmp.into()) };
+
+    let full_rect = RECT {
+        left: 0,
+        top: 0,
+        right: client_w,
+        bottom: client_h,
     };
-    unsafe { FillRect(hdc, &ps.rcPaint, bg_brush); }
+
+    // Background.
+    let bg_brush: HBRUSH = unsafe { CreateSolidBrush(theme.bg) };
+    unsafe { FillRect(mem_dc, &full_rect, bg_brush) };
     unsafe { let _ = DeleteObject(bg_brush.into()); }
 
-    let old_font = unsafe { SelectObject(hdc, pd.font.into()) };
-    unsafe { SetBkMode(hdc, TRANSPARENT); }
+    // Border.
+    let border_brush: HBRUSH = unsafe { CreateSolidBrush(theme.border) };
+    unsafe { FrameRect(mem_dc, &full_rect, border_brush) };
+    unsafe { let _ = DeleteObject(border_brush.into()); }
 
-    let mut y = PADDING;
+    let old_font = unsafe { SelectObject(mem_dc, pd.font.into()) };
+    unsafe { SetBkMode(mem_dc, TRANSPARENT) };
+
+    let padding = scale(BASE_PADDING, pd.dpi);
+    let row_h = scale(BASE_ROW_HEIGHT, pd.dpi);
+
+    let mut y = padding;
     for (i, cand) in pd.candidates.iter().enumerate() {
         let key_ch = pd.selection_keys.get(i).copied().unwrap_or(' ');
         let label = format!("{}. {}", key_ch, cand);
         let label_w: Vec<u16> = label.encode_utf16().collect();
 
-        if i == pd.highlighted {
-            let hl_brush = unsafe {
-                windows::Win32::Graphics::Gdi::CreateSolidBrush(
-                    windows::Win32::Foundation::COLORREF(0x00FFD0A0),
-                )
-            };
+        let (fg, drew_highlight) = if i == pd.highlighted {
             let hl_rect = RECT {
-                left: 0, top: y, right: ps.rcPaint.right, bottom: y + ROW_HEIGHT,
+                left: padding / 2,
+                top: y,
+                right: client_w - padding / 2,
+                bottom: y + row_h,
             };
-            unsafe { FillRect(hdc, &hl_rect, hl_brush); }
+            let hl_brush: HBRUSH = unsafe { CreateSolidBrush(theme.highlight_bg) };
+            unsafe { FillRect(mem_dc, &hl_rect, hl_brush) };
             unsafe { let _ = DeleteObject(hl_brush.into()); }
-        }
+            (theme.highlight_fg, true)
+        } else {
+            (theme.fg, false)
+        };
+        let _ = drew_highlight;
 
-        unsafe { SetTextColor(hdc, windows::Win32::Foundation::COLORREF(0x00000000)); }
-        unsafe { let _ = TextOutW(hdc, PADDING, y + 2, &label_w); }
-        y += ROW_HEIGHT;
+        unsafe { SetTextColor(mem_dc, fg) };
+        unsafe { let _ = TextOutW(mem_dc, padding, y + padding / 4, &label_w); }
+        y += row_h;
     }
 
-    // Page info
     if !pd.page_info.is_empty() {
         let info_w: Vec<u16> = pd.page_info.encode_utf16().collect();
         unsafe {
-            SetTextColor(hdc, windows::Win32::Foundation::COLORREF(0x00808080));
-            let _ = TextOutW(hdc, PADDING, y + 2, &info_w);
+            SetTextColor(mem_dc, theme.fg_dim);
+            let _ = TextOutW(mem_dc, padding, y + padding / 4, &info_w);
         }
     }
 
-    unsafe { SelectObject(hdc, old_font); }
-    unsafe { let _ = EndPaint(hwnd, &ps); }
+    // Blit memory DC to the real DC.
+    unsafe {
+        let _ = BitBlt(
+            hdc,
+            ps.rcPaint.left,
+            ps.rcPaint.top,
+            client_w,
+            client_h,
+            Some(mem_dc),
+            0,
+            0,
+            SRCCOPY,
+        );
+    }
+
+    unsafe {
+        SelectObject(mem_dc, old_font);
+        SelectObject(mem_dc, old_bmp);
+        let _ = DeleteObject(mem_bmp.into());
+        let _ = DeleteDC(mem_dc);
+        let _ = EndPaint(hwnd, &ps);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -334,18 +517,55 @@ fn create_font(size: i32) -> HFONT {
     lf.lfHeight = -size;
     lf.lfWeight = 400;
     lf.lfCharSet = windows::Win32::Graphics::Gdi::FONT_CHARSET(136); // CHINESEBIG5_CHARSET
-    let face = "Microsoft JhengHei";
+
+    // Prefer Microsoft JhengHei UI; fall back to JhengHei.
+    let face = "Microsoft JhengHei UI";
     let face_w: Vec<u16> = face.encode_utf16().collect();
     for (i, &ch) in face_w.iter().enumerate() {
-        if i < 32 { lf.lfFaceName[i] = ch; }
+        if i < 31 {
+            lf.lfFaceName[i] = ch;
+        }
     }
     unsafe { CreateFontIndirectW(&lf) }
 }
 
-fn clamp_to_screen(x: i32, y: i32, w: i32, h: i32) -> (i32, i32) {
-    let scr_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
-    let scr_h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
-    let fx = if x + w > scr_w { scr_w - w } else { x };
-    let fy = if y + h > scr_h { y - h - 30 } else { y }; // flip above if off-screen
-    (fx.max(0), fy.max(0))
+fn current_dpi(hwnd: HWND) -> u32 {
+    // GetDpiForWindow works on Win10 1607+; fall back to 96.
+    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    if dpi == 0 { 96 } else { dpi }
 }
+
+fn clamp_to_monitor(x: i32, y: i32, w: i32, h: i32) -> (i32, i32) {
+    let pt = POINT { x, y };
+    let hmon = unsafe { MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST) };
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    let ok = unsafe { GetMonitorInfoW(hmon, &mut info) };
+    if !ok.as_bool() {
+        return (x.max(0), y.max(0));
+    }
+    let work = info.rcWork;
+
+    let mut fx = x;
+    let mut fy = y;
+    if fx + w > work.right {
+        fx = work.right - w;
+    }
+    if fy + h > work.bottom {
+        // Flip above the caret.
+        fy = y - h - 30;
+    }
+    if fx < work.left {
+        fx = work.left;
+    }
+    if fy < work.top {
+        fy = work.top;
+    }
+    (fx, fy)
+}
+
+// Silence unused-variable warnings for HDC import (kept for readability).
+#[allow(dead_code)]
+fn _touch(_: HDC) {}

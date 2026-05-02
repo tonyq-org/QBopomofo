@@ -5,7 +5,7 @@ macro_rules! symbol_map {
 }
 
 static SPECIAL_SYMBOLS: [(char, char); 29] = symbol_map! {
-    '[' => '「', ']' => '」', '{' => '『', '}' => '』',
+    '[' => '「', ']' => '」', '{' => '﹃', '}' => '﹄',
     '\'' => '、', '<' => '，', ':' => '：', '\"' => '；',
     '>' => '。', '~' => '～', '!' => '！', '@' => '＠',
     '#' => '＃', '$' => '＄', '%' => '％', '^' => '︿',
@@ -50,4 +50,27 @@ pub(crate) fn full_width_symbol_input(key: char) -> Option<char> {
         .find(|item| item.0 == key)
         .map(|item| item.1)
         .or_else(|| special_symbol_input(key))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{full_width_symbol_input, special_symbol_input};
+
+    #[test]
+    fn shifted_brackets_use_narrow_corner_quotes() {
+        assert_eq!(Some('﹃'), special_symbol_input('{'));
+        assert_eq!(Some('﹄'), special_symbol_input('}'));
+    }
+
+    #[test]
+    fn unshifted_brackets_keep_corner_quotes() {
+        assert_eq!(Some('「'), special_symbol_input('['));
+        assert_eq!(Some('」'), special_symbol_input(']'));
+    }
+
+    #[test]
+    fn full_width_braces_stay_full_width_braces() {
+        assert_eq!(Some('｛'), full_width_symbol_input('{'));
+        assert_eq!(Some('｝'), full_width_symbol_input('}'));
+    }
 }
