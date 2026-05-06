@@ -7,11 +7,11 @@ use std::ffi::c_int;
 use std::path::Path;
 use std::ptr::null_mut;
 
+use chewing_capi::candidates::{
+    chewing_cand_open, chewing_cand_string_by_index_static, chewing_cand_TotalChoice,
+};
 use chewing_capi::input::chewing_handle_Default;
-use chewing_capi::input::chewing_handle_Enter;
 use chewing_capi::output::chewing_buffer_String;
-use chewing_capi::output::chewing_commit_Check;
-use chewing_capi::output::chewing_commit_String;
 use chewing_capi::setup::chewing_delete;
 use chewing_capi::setup::chewing_new2;
 use tempfile::tempdir;
@@ -55,10 +55,8 @@ unsafe fn type_keys_and_get_preedit(
     }
 }
 
-/// Type a key sequence, press Enter, and return committed text.
-unsafe fn type_keys_and_commit(
-    keys: &str,
-) -> Result<String, Box<dyn Error>> {
+/// Type a key sequence, open candidates, and return the first candidate.
+unsafe fn first_candidate_for(keys: &str) -> Result<String, Box<dyn Error>> {
     let syspath = qbopomofo_syspath()?;
     let tmpdir = tempdir()?;
     let userpath = CString::new(
@@ -73,14 +71,14 @@ unsafe fn type_keys_and_commit(
             chewing_handle_Default(ctx, ch as c_int);
         }
 
-        chewing_handle_Enter(ctx);
+        assert_eq!(chewing_cand_open(ctx), 0, "Failed to open candidate list");
+        assert!(
+            chewing_cand_TotalChoice(ctx) > 0,
+            "Expected at least one candidate"
+        );
 
-        let result = if chewing_commit_Check(ctx) != 0 {
-            let commit = chewing_commit_String(ctx);
-            CStr::from_ptr(commit).to_str()?.to_string()
-        } else {
-            String::new()
-        };
+        let candidate = chewing_cand_string_by_index_static(ctx, 0);
+        let result = CStr::from_ptr(candidate).to_str()?.to_string();
 
         chewing_delete(ctx);
         Ok(result)
@@ -103,6 +101,14 @@ fn yong_not_yong_servant() -> Result<(), Box<dyn Error>> {
         "Should not contain 佣, got: {}",
         preedit
     );
+    Ok(())
+}
+
+#[test]
+fn bu_tone4_candidate_prefers_not() -> Result<(), Box<dyn Error>> {
+    // 1j4 = ㄅㄨˋ.  The common word 不 should not be buried behind 部/布/步.
+    let candidate = unsafe { first_candidate_for("1j4")? };
+    assert_eq!("不", candidate);
     Ok(())
 }
 
