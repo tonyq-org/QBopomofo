@@ -113,6 +113,36 @@ fn bu_tone4_candidate_prefers_not() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn yi_biao_ban_prefers_dashboard() -> Result<(), Box<dyn Error>> {
+    // u6 1ul3 103 = ㄧˊ ㄅㄧㄠˇ ㄅㄢˇ.
+    let preedit = unsafe { type_keys_and_get_preedit("u61ul3103")? };
+    assert!(
+        preedit.contains("儀表板"),
+        "Expected 儀表板, got: {}",
+        preedit
+    );
+    Ok(())
+}
+
+#[test]
+fn zai_qiao_shi_jian_prefers_knock() -> Result<(), Box<dyn Error>> {
+    // y94 ful g6 ru0 = ㄗㄞˋ ㄑㄧㄠ ㄕˊ ㄐㄧㄢ.
+    // Spaces commit first-tone ㄑㄧㄠ/ㄐㄧㄢ syllables in this keyboardless test.
+    let preedit = unsafe { type_keys_and_get_preedit("y94ful g6ru0 ")? };
+    assert!(
+        preedit.contains("再敲時間"),
+        "Expected 再敲時間, got: {}",
+        preedit
+    );
+    assert!(
+        !preedit.contains("再悄時間"),
+        "Should not prefer 再悄時間, got: {}",
+        preedit
+    );
+    Ok(())
+}
+
+#[test]
 fn common_single_chars_by_freq() -> Result<(), Box<dyn Error>> {
     // Test several common characters that should beat their homophones
     let cases = [

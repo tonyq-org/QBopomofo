@@ -8,6 +8,7 @@
 |------|------|
 | `phrases.csv` | 自訂詞庫：新增詞彙或覆蓋上游詞頻 |
 | `moedict-phrases.csv` | 教育部《重編國語辭典（修訂本）》詞條（freq=1 fallback） |
+| `tw-politicians.csv` | 台灣政治人物姓名（freq=1000） |
 
 ## 資料來源
 
@@ -15,6 +16,11 @@
 [g0v/moedict-data](https://github.com/g0v/moedict-data) 萃取，原始字典為
 教育部《重編國語辭典（修訂本）》（CC BY-ND 3.0 TW）。本檔僅含詞條 headword + 注音，
 不含釋義；依教育部解釋此種利用方式不受 ND 限制。詳見根目錄 `NOTICE` 檔。
+
+`tw-politicians.csv` 由 [`tools/generate_tw_politicians.py`](../tools/generate_tw_politicians.py)
+產生，包含立法院開放資料第 11 屆現任委員姓名（政府資料開放授權條款第 1 版）
+及 QBopomofo 手動維護的高關注台灣政治人物 seed list。注音由本 repo 既有字庫在
+build-time 轉出，少量姓名常見讀音以 script override。
 
 ## 使用方式
 

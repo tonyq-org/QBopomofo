@@ -25,6 +25,16 @@ moedict-data - 教育部《重編國語辭典（修訂本）》詞條（headword
   reading — no definitions, examples, or other textual content from
   the original dictionary is incorporated.
 
+Legislative Yuan Open Data Platform - 第11屆立法委員姓名
+  Original work: 立法院開放資料服務平台「歷屆委員資料」(dataset 16)
+  License: Government Open Data License, version 1.0
+  Source: https://data.ly.gov.tw/getds.action?id=16
+  Location in this repo: data-provider/custom-data/tw-politicians.csv
+  Note: This project extracts only legislator names and generates
+  bopomofo readings from the local dictionary at build-time. The
+  generated file also includes a small QBopomofo-maintained seed list
+  of high-profile Taiwan political figures.
+
 Modifications and additional code in this repository (QBopomofo) are
 Copyright (c) 2026 TonyQ Wang
 License: LGPL-2.1-or-later
