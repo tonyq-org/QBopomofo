@@ -2,7 +2,7 @@ use std::cmp::{Reverse, min};
 
 use crate::{
     conversion::{Composition, Gap, Interval},
-    dictionary::{Dictionary, Layered, LookupStrategy},
+    dictionary::{Dictionary, Layered, LookupStrategy, Phrase},
     editor::{EditorError, EditorErrorKind, SharedState},
     zhuyin::Syllable,
 };
@@ -222,31 +222,54 @@ impl PhraseSelector {
         cursor
     }
 
-    pub(crate) fn candidates(&self, editor: &SharedState, dict: &Layered) -> Vec<String> {
+    /// Build the candidate phrase list (dict-only, no alt-syllable expansion).
+    ///
+    /// For a range of length R starting at `begin`, this returns:
+    ///   * all phrases of length R covering [begin, end)
+    ///   * for R > 1, all phrases of intermediate lengths 2..R starting at `begin`
+    ///     (longest first)
+    ///   * for R > 1, all single-character phrases at the cursor position
+    ///
+    /// Splitting this out lets us unit-test multi-length lookup without
+    /// constructing a full `SharedState`.
+    pub(crate) fn candidate_phrases(&self, dict: &Layered) -> Vec<Phrase> {
+        let range = self.end - self.begin;
         let syllables: Vec<Syllable> = self.com.symbols()[self.begin..self.end]
             .iter()
             .map(|s| s.to_syllable().unwrap_or_default())
             .collect();
-        let mut candidates = dict
-            .lookup(&syllables, self.lookup_strategy)
-            .into_iter()
-            .collect::<Vec<_>>();
-        // For multi-character phrases, also include single-character candidates
-        // for the character at the cursor position so users can correct individual characters.
-        if self.end - self.begin > 1 {
+        let mut out = dict.lookup(&syllables, self.lookup_strategy);
+        if range > 1 {
+            for len in (2..range).rev() {
+                out.extend(
+                    dict.lookup(&syllables[..len], self.lookup_strategy)
+                        .into_iter(),
+                );
+            }
             let single_pos = if self.orig < self.end { self.orig } else { self.begin };
             if let Some(sym) = self.com.symbol(single_pos) {
                 if let Some(syl) = sym.to_syllable() {
-                    let single_candidates = dict.lookup(&[syl], self.lookup_strategy);
-                    candidates.extend(single_candidates.into_iter());
+                    out.extend(dict.lookup(&[syl], self.lookup_strategy).into_iter());
+                }
+            }
+        }
+        out
+    }
+
+    pub(crate) fn candidates(&self, editor: &SharedState, dict: &Layered) -> Vec<String> {
+        let mut candidates = self.candidate_phrases(dict);
+        let range = self.end - self.begin;
+        if range > 1 {
+            let single_pos = if self.orig < self.end { self.orig } else { self.begin };
+            if let Some(sym) = self.com.symbol(single_pos) {
+                if let Some(syl) = sym.to_syllable() {
                     let alt = editor.syl.alt_syllables(syl);
                     for &alt_syl in alt {
                         candidates.extend(dict.lookup(&[alt_syl], self.lookup_strategy).into_iter());
                     }
                 }
             }
-        }
-        if self.end - self.begin == 1 {
+        } else {
             let alt = editor
                 .syl
                 .alt_syllables(self.com.symbol(self.begin).unwrap().to_syllable().unwrap());
@@ -389,6 +412,135 @@ mod tests {
         assert_eq!(0, sel.after_previous_break_point(0));
         assert_eq!(0, sel.after_previous_break_point(1));
         assert_eq!(0, sel.after_previous_break_point(2));
+    }
+
+    #[test]
+    fn candidate_phrases_includes_intermediate_lengths_for_3char_range() {
+        use crate::dictionary::Layered;
+
+        // Buffer: ㄧˋ ㄕˋ ㄐㄧㄝˋ
+        let mut com = Composition::new();
+        com.push(Symbol::from(syl![I, TONE4]));
+        com.push(Symbol::from(syl![SH, TONE4]));
+        com.push(Symbol::from(syl![J, I, EH, TONE4]));
+
+        // Dict has phrases at all three lengths starting at position 0.
+        let trie = TrieBuf::from([
+            (
+                vec![syl![I, TONE4], syl![SH, TONE4], syl![J, I, EH, TONE4]],
+                vec![("異世界", 5000)],
+            ),
+            (
+                vec![syl![I, TONE4], syl![SH, TONE4]],
+                vec![("意識", 2273), ("亦是", 3000)],
+            ),
+            (vec![syl![I, TONE4]], vec![("異", 3257), ("意", 14786)]),
+        ]);
+        let dict = Layered::new(vec![Box::new(trie)]);
+
+        let sel = PhraseSelector {
+            begin: 0,
+            end: 3,
+            forward_select: false,
+            orig: 0,
+            lookup_strategy: LookupStrategy::Standard,
+            com,
+        };
+
+        let phrases = sel.candidate_phrases(&dict);
+        let texts: Vec<&str> = phrases.iter().map(|p| p.as_str()).collect();
+
+        assert!(
+            texts.contains(&"異世界"),
+            "missing 3-char phrase: {:?}",
+            texts
+        );
+        assert!(
+            texts.contains(&"意識") || texts.contains(&"亦是"),
+            "missing 2-char phrase at begin: {:?}",
+            texts
+        );
+        assert!(
+            texts.contains(&"異") || texts.contains(&"意"),
+            "missing 1-char phrase at cursor: {:?}",
+            texts
+        );
+    }
+
+    #[test]
+    fn candidate_phrases_2char_range_unchanged() {
+        // Range == 2: no intermediate lengths exist, behavior should match
+        // the pre-change semantics (full-range phrases + 1-char at cursor).
+        use crate::dictionary::Layered;
+
+        let mut com = Composition::new();
+        com.push(Symbol::from(syl![SH, TONE4]));
+        com.push(Symbol::from(syl![J, I, EH, TONE4]));
+
+        let trie = TrieBuf::from([
+            (
+                vec![syl![SH, TONE4], syl![J, I, EH, TONE4]],
+                vec![("世界", 30817), ("視界", 470)],
+            ),
+            (vec![syl![SH, TONE4]], vec![("世", 100), ("是", 200)]),
+        ]);
+        let dict = Layered::new(vec![Box::new(trie)]);
+
+        let sel = PhraseSelector {
+            begin: 0,
+            end: 2,
+            forward_select: false,
+            orig: 0,
+            lookup_strategy: LookupStrategy::Standard,
+            com,
+        };
+
+        let phrases = sel.candidate_phrases(&dict);
+        let texts: Vec<&str> = phrases.iter().map(|p| p.as_str()).collect();
+
+        assert!(texts.contains(&"世界"), "missing 世界: {:?}", texts);
+        assert!(
+            texts.contains(&"世") || texts.contains(&"是"),
+            "missing 1-char at cursor: {:?}",
+            texts
+        );
+    }
+
+    #[test]
+    fn candidate_phrases_1char_range_only_full_lookup() {
+        // Range == 1: only the full-range lookup runs; no intermediate, no
+        // separate cursor-1-char branch (it's the same as the full lookup).
+        use crate::dictionary::Layered;
+
+        let mut com = Composition::new();
+        com.push(Symbol::from(syl![I, TONE4]));
+
+        let trie = TrieBuf::from([(vec![syl![I, TONE4]], vec![("異", 3257), ("意", 14786)])]);
+        let dict = Layered::new(vec![Box::new(trie)]);
+
+        let sel = PhraseSelector {
+            begin: 0,
+            end: 1,
+            forward_select: false,
+            orig: 0,
+            lookup_strategy: LookupStrategy::Standard,
+            com,
+        };
+
+        let phrases = sel.candidate_phrases(&dict);
+        let texts: Vec<&str> = phrases.iter().map(|p| p.as_str()).collect();
+
+        assert!(texts.contains(&"異"), "missing 異: {:?}", texts);
+        assert!(texts.contains(&"意"), "missing 意: {:?}", texts);
+        // No phrase should be longer than 1 char.
+        for t in &texts {
+            assert_eq!(
+                t.chars().count(),
+                1,
+                "unexpected multi-char phrase in 1-char range: {}",
+                t
+            );
+        }
     }
 
     #[test]
