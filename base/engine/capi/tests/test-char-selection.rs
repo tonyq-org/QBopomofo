@@ -143,6 +143,52 @@ fn zai_qiao_shi_jian_prefers_knock() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn yi_shi_jie_prefers_isekai_phrase() -> Result<(), Box<dyn Error>> {
+    // u4 g4 ru,4 = ㄧˋ ㄕˋ ㄐㄧㄝˋ.
+    let preedit = unsafe { type_keys_and_get_preedit("u4g4ru,4")? };
+    assert!(
+        preedit.contains("異世界"),
+        "Expected 異世界, got: {}",
+        preedit
+    );
+    Ok(())
+}
+
+#[test]
+fn xiang_bu_dao_prefers_unexpected_phrase() -> Result<(), Box<dyn Error>> {
+    // vu;3 1j4 2l4 = ㄒㄧㄤˇ ㄅㄨˋ ㄉㄠˋ.
+    let preedit = unsafe { type_keys_and_get_preedit("vu;31j42l4")? };
+    assert!(
+        preedit.contains("想不到"),
+        "Expected 想不到, got: {}",
+        preedit
+    );
+    assert!(
+        !preedit.contains("想步道"),
+        "Should not prefer 想步道, got: {}",
+        preedit
+    );
+    Ok(())
+}
+
+#[test]
+fn dui_qi_prefers_alignment_phrase() -> Result<(), Box<dyn Error>> {
+    // 2jo4 fu6 = ㄉㄨㄟˋ ㄑㄧˊ.
+    let preedit = unsafe { type_keys_and_get_preedit("2jo4fu6")? };
+    assert!(
+        preedit.contains("對齊"),
+        "Expected 對齊, got: {}",
+        preedit
+    );
+    assert!(
+        !preedit.contains("對其"),
+        "Should not prefer 對其, got: {}",
+        preedit
+    );
+    Ok(())
+}
+
+#[test]
 fn common_single_chars_by_freq() -> Result<(), Box<dyn Error>> {
     // Test several common characters that should beat their homophones
     let cases = [
