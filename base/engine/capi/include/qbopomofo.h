@@ -48,6 +48,11 @@ int qb_composing_is_shift_held(const QBComposingSession *session);
 /** Mark that a key was typed while Shift was held (prevents mode toggle on release). */
 void qb_composing_mark_shift_used(QBComposingSession *session);
 
+/** Reset the Shift state machine after the IME regains focus
+ *  (global Shift events fired during the inactive window get dropped, so
+ *  shift_held may be stale). */
+void qb_composing_reset_shift_state(QBComposingSession *session);
+
 /**
  * Type an English character.
  * @param chinese_buffer current chewing buffer content (UTF-8). NULL or "" if empty.

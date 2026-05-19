@@ -1,4 +1,5 @@
 import Cocoa
+import ApplicationServices
 @preconcurrency import InputMethodKit
 import CChewing
 
@@ -30,6 +31,15 @@ private func dbg(_ msg: String) {
         persistentLogHandle?.seekToEndOfFile()
         persistentLogHandle?.write(data)
     }
+}
+
+private func frontmostAppDescription() -> String {
+    guard let app = NSWorkspace.shared.frontmostApplication else {
+        return "unknown"
+    }
+    let name = app.localizedName ?? "unknown"
+    let bundleID = app.bundleIdentifier ?? "unknown"
+    return "\(name) (\(bundleID))"
 }
 
 // Correction log: always records candidate corrections for phrase tuning
@@ -125,9 +135,15 @@ class QBopomofoInputController: IMKInputController {
     override func activateServer(_ sender: Any!) {
         currentClient = sender as? IMKTextInput
         if chewingContext == nil { initializeEngine() }
+        if let session = composingSession {
+            // Global Shift events fired while activeController=nil get dropped,
+            // so shift_held can be desynced from the physical key after app
+            // switches. The user just regained focus → shift must be released.
+            qb_composing_reset_shift_state(session)
+        }
         QBopomofoInputController.activeController = self
         QBopomofoInputController.ensureShiftMonitor()
-        dbg("Server activated")
+        dbg("Server activated app=\(frontmostAppDescription()) sender=\(String(describing: type(of: sender)))")
     }
 
     override func deactivateServer(_ sender: Any!) {
@@ -136,17 +152,36 @@ class QBopomofoInputController: IMKInputController {
         }
         commitComposition(sender)
         currentClient = nil
-        dbg("Server deactivated")
+        dbg("Server deactivated app=\(frontmostAppDescription()) sender=\(String(describing: type(of: sender)))")
     }
 
     private static func ensureShiftMonitor() {
         guard shiftMonitor == nil else { return }
         guard UserDefaults.standard.bool(forKey: "org.qbopomofo.shiftMonitorEnabled") else { return }
+        let axTrusted = AXIsProcessTrusted()
         shiftMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { event in
             let isShift = event.modifierFlags.contains(.shift)
             DispatchQueue.main.async {
-                QBopomofoInputController.activeController?.handleGlobalShiftChange(isShift: isShift)
+                guard let controller = QBopomofoInputController.activeController else {
+                    dbg("globalShift dropped isShift=\(isShift) activeController=nil app=\(frontmostAppDescription())")
+                    return
+                }
+                controller.handleGlobalShiftChange(isShift: isShift)
             }
+        }
+        dbg("shiftMonitor installed axTrusted=\(axTrusted) monitor=\(shiftMonitor != nil)")
+    }
+
+    private func rememberActiveClient(_ sender: Any!) {
+        if let client = sender as? IMKTextInput {
+            currentClient = client
+        }
+        if QBopomofoInputController.activeController !== self {
+            QBopomofoInputController.activeController = self
+            dbg("Server activated opportunistically app=\(frontmostAppDescription()) sender=\(String(describing: type(of: sender)))")
+        }
+        if QBopomofoInputController.shiftMonitor == nil {
+            QBopomofoInputController.ensureShiftMonitor()
         }
     }
 
@@ -249,9 +284,12 @@ class QBopomofoInputController: IMKInputController {
     /// Standalone Shift taps cannot be detected here — Chromium's modern IMK path doesn't deliver flagsChanged.
     /// We bracket the keyDown with synthetic shift-down/up so SmartToggle's "Shift + letter = English" still works.
     override func inputText(_ string: String!, key keyCode: Int, modifiers flags: Int, client sender: Any!) -> Bool {
-        guard UserDefaults.standard.bool(forKey: "org.qbopomofo.inputTextFallback") else {
+        let fallbackEnabled = UserDefaults.standard.bool(forKey: "org.qbopomofo.inputTextFallback")
+        dbg("inputText enter app=\(frontmostAppDescription()) key=\(keyCode) flags=\(flags) fallback=\(fallbackEnabled) sender=\(String(describing: type(of: sender))) text='\(string ?? "")'")
+        guard fallbackEnabled else {
             return false
         }
+        rememberActiveClient(sender)
         let modifierFlags = NSEvent.ModifierFlags(rawValue: UInt(flags))
         let chars = string ?? ""
         let hasShift = modifierFlags.contains(.shift)
@@ -302,6 +340,7 @@ class QBopomofoInputController: IMKInputController {
             dbg("handle called but engine not initialized")
             return false
         }
+        rememberActiveClient(sender)
         guard let client = (sender as? IMKTextInput) ?? currentClient else {
             dbg("handle called but sender is not IMKTextInput: \(String(describing: type(of: sender)))")
             return false

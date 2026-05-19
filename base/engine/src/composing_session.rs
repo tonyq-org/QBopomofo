@@ -77,6 +77,15 @@ impl ComposingSession {
         }
     }
 
+    /// Reset the Shift state machine (used when the IME regains focus after an
+    /// app switch). Global Shift events fired during the inactive window get
+    /// dropped, so on resume we cannot trust `shift_held` to reflect physical
+    /// reality — force it back to the "released" baseline.
+    pub fn reset_shift_state(&mut self) {
+        self.shift_held = false;
+        self.shift_typed_while_held = false;
+    }
+
     // MARK: - Shift handling
 
     /// Handle Shift key press/release. Returns true if mode changed.
@@ -626,7 +635,39 @@ impl Default for ComposingSession {
 
 #[cfg(test)]
 mod tests {
-    use super::ComposingSession;
+    use super::{ComposingSession, ModePreferences, ShiftBehavior};
+
+    #[test]
+    fn reset_shift_state_unsticks_a_dropped_shift_down() {
+        // Simulate the app-switch bug: Shift down was delivered but the
+        // matching Shift up was dropped (activeController=nil at the time).
+        // The engine ends up with shift_held=true and shift_typed_while_held=true
+        // from the previous interaction. On the next Shift tap, the stale state
+        // would make Shift-up take the "Hold released" branch instead of
+        // toggling, so mode would not flip.
+        let mut session = ComposingSession::new();
+        let prefs = ModePreferences {
+            shift_behavior: ShiftBehavior::SmartToggle,
+            ..Default::default()
+        };
+
+        // Simulate: user was Chinese, held Shift, typed a letter, then Shift up
+        // was dropped during an app switch.
+        assert!(!session.handle_shift(true, &prefs, ""));
+        session.mark_shift_used();
+        // (no Shift up — it was dropped)
+        assert!(session.is_shift_held());
+
+        // Activate fires → reset.
+        session.reset_shift_state();
+        assert!(!session.is_shift_held());
+
+        // Now a clean Shift tap should toggle to English.
+        assert!(!session.handle_shift(true, &prefs, ""));
+        let toggled = session.handle_shift(false, &prefs, "");
+        assert!(toggled, "Shift tap should toggle after reset");
+        assert!(session.is_english_mode(), "expected English after toggle");
+    }
 
     #[test]
     fn insert_english_at_splits_remaining_chinese() {

@@ -86,6 +86,15 @@ pub extern "C" fn qb_composing_mark_shift_used(session: *mut QBComposingSession)
     s.inner.mark_shift_used();
 }
 
+/// Reset the Shift state machine. Call when the IME regains focus to
+/// recover from dropped global Shift events during app-switch gaps.
+#[unsafe(no_mangle)]
+pub extern "C" fn qb_composing_reset_shift_state(session: *mut QBComposingSession) {
+    if session.is_null() { return; }
+    let s = unsafe { &mut *session };
+    s.inner.reset_shift_state();
+}
+
 /// Type an English character.
 /// `chinese_buffer`: current chewing buffer content (UTF-8). Pass NULL or "" if empty.
 /// Returns 1 if caller should directly commit this character (no Chinese context),
