@@ -17,12 +17,34 @@ DATA_DIR="$SCRIPT_DIR/chewing-data"
 CUSTOM_DIR="$SCRIPT_DIR/custom-data"
 OUTPUT_DIR="$SCRIPT_DIR/output"
 
+# Pick a working Python. On Windows, `python3` on PATH may be the Microsoft
+# Store stub which fails with "Permission denied" — actually execute it to
+# verify instead of just checking it exists.
+if python3 -c 'pass' >/dev/null 2>&1; then
+  PYTHON=python3
+elif python -c 'pass' >/dev/null 2>&1; then
+  PYTHON=python
+else
+  echo "error: no working python3/python interpreter found" >&2
+  exit 1
+fi
+
+# Git Bash paths (/c/...) are not understood by native Windows Python —
+# convert to mixed form (C:/...) when cygpath is available (no-op elsewhere).
+npath() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -m "$1"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
 echo "=== QBopomofo Data Provider ==="
 echo "Building dictionary data from CSV..."
 echo ""
 
 # Build chewing-cli tool
-echo "[1/5] Building chewing-cli..."
+echo "[1/7] Building chewing-cli..."
 cargo build --release --manifest-path "$ENGINE_DIR/tools/Cargo.toml"
 
 CLI="$ENGINE_DIR/target/release/chewing-cli"
@@ -31,7 +53,7 @@ CLI="$ENGINE_DIR/target/release/chewing-cli"
 mkdir -p "$OUTPUT_DIR"
 
 # Merge upstream tsi.csv with custom phrases
-echo "[2/5] Merging custom phrases..."
+echo "[2/7] Merging custom phrases..."
 MERGED_TSI="$OUTPUT_DIR/_merged_tsi.csv"
 cp "$DATA_DIR/tsi.csv" "$MERGED_TSI"
 # Append all custom CSV files (skip empty or comment-only files)
@@ -46,16 +68,19 @@ for csv in "$CUSTOM_DIR"/*.csv; do
 done
 
 # Enrich word.csv with single-char frequencies from tsi.csv
-echo "[3/6] Enriching word.csv with tsi.csv single-char frequencies..."
+echo "[3/7] Enriching word.csv with tsi.csv single-char frequencies..."
 ENRICHED_WORD="$OUTPUT_DIR/_enriched_word.csv"
-python3 -c "
+MERGED_TSI_PY="$(npath "$MERGED_TSI")"
+WORD_CSV_PY="$(npath "$DATA_DIR/word.csv")"
+ENRICHED_WORD_PY="$(npath "$ENRICHED_WORD")"
+"$PYTHON" -c "
 import csv, sys
 from collections import defaultdict
 
 # Read single-char frequencies from merged tsi.csv (which includes custom phrases).
 # Custom phrases are appended last, so the last occurrence wins.
 freq = {}
-with open('$MERGED_TSI') as f:
+with open('$MERGED_TSI_PY') as f:
     for row in csv.reader(f):
         if not row or row[0].startswith('#') or len(row) < 3:
             continue
@@ -66,7 +91,7 @@ with open('$MERGED_TSI') as f:
 
 # Enrich word.csv: replace freq=0 with tsi freq if available
 updated = 0
-with open('$DATA_DIR/word.csv') as fin, open('$ENRICHED_WORD', 'w', newline='') as fout:
+with open('$WORD_CSV_PY') as fin, open('$ENRICHED_WORD_PY', 'w', newline='') as fout:
     writer = csv.writer(fout)
     for row in csv.reader(fin):
         if not row or row[0].startswith('#'):
@@ -85,7 +110,7 @@ print(f'  Enriched {updated} single-char entries with tsi.csv frequencies')
 # Spread apart homophones with freq diff < 100 to ensure stable ordering
 # Read back enriched file, group by zhuyin, detect near-collisions
 rows = []
-with open('$ENRICHED_WORD') as f:
+with open('$ENRICHED_WORD_PY') as f:
     for row in csv.reader(f):
         rows.append(row)
 
@@ -110,7 +135,7 @@ for zhuyin, indices in by_zhuyin.items():
             rows[indices[j]][1] = str(new_freq)
             spread += 1
 
-with open('$ENRICHED_WORD', 'w', newline='') as fout:
+with open('$ENRICHED_WORD_PY', 'w', newline='') as fout:
     writer = csv.writer(fout)
     for row in rows:
         writer.writerow(row)
@@ -119,8 +144,54 @@ if spread > 0:
     print(f'  Spread apart {spread} near-collision homophones (gap < 100)')
 "
 
+# Break frequency ties among same-pronunciation phrases in merged tsi.csv.
+#
+# Unlike the word.csv spread above (gap 100), this only breaks exact ties
+# (gap 1): multi-syllable phrase frequencies feed directly into path scoring
+# (log(freq)), so widening gaps by 100 would distort segmentation choices for
+# low-frequency phrases. Ties are the only source of ordering instability —
+# a gap of 1 makes the sort deterministic with minimal score impact.
+echo "[4/7] Breaking tsi.csv homophone frequency ties..."
+"$PYTHON" -c "
+import csv
+from collections import defaultdict
+
+rows = []
+with open('$MERGED_TSI_PY') as f:
+    for row in csv.reader(f):
+        rows.append(row)
+
+by_zhuyin = defaultdict(list)
+for i, row in enumerate(rows):
+    if not row or row[0].startswith('#') or len(row) < 3:
+        continue
+    key = ' '.join(row[2].split())
+    by_zhuyin[key].append(i)
+
+spread = 0
+for key, indices in by_zhuyin.items():
+    if len(indices) < 2:
+        continue
+    # Stable sort by freq desc: ties keep file order, so upstream entries
+    # stay ahead of later custom entries unless freqs say otherwise.
+    indices.sort(key=lambda i: -int(rows[i][1]))
+    for j in range(1, len(indices)):
+        prev_freq = int(rows[indices[j-1]][1])
+        curr_freq = int(rows[indices[j]][1])
+        if curr_freq >= prev_freq:
+            rows[indices[j]][1] = str(max(prev_freq - 1, 0))
+            spread += 1
+
+with open('$MERGED_TSI_PY', 'w', newline='') as fout:
+    writer = csv.writer(fout)
+    for row in rows:
+        writer.writerow(row)
+
+print(f'  Broke {spread} frequency ties among same-pronunciation phrases')
+"
+
 # Build word.dat (single character dictionary)
-echo "[4/6] Building word.dat from enriched word.csv..."
+echo "[5/7] Building word.dat from enriched word.csv..."
 "$CLI" init-database \
   --db-type trie \
   --csv \
@@ -132,7 +203,7 @@ rm -f "$ENRICHED_WORD"
 echo ""
 
 # Build tsi.dat (phrase dictionary — merged with custom data)
-echo "[5/6] Building tsi.dat from merged tsi.csv + custom phrases..."
+echo "[6/7] Building tsi.dat from merged tsi.csv + custom phrases..."
 "$CLI" init-database \
   --db-type trie \
   --csv \
@@ -146,7 +217,7 @@ rm -f "$MERGED_TSI"
 echo ""
 
 # Copy symbol and abbreviation tables (raw text, no compilation needed)
-echo "[6/6] Copying symbols.dat and swkb.dat..."
+echo "[7/7] Copying symbols.dat and swkb.dat..."
 cp "$DATA_DIR/symbols.dat" "$OUTPUT_DIR/symbols.dat"
 cp "$DATA_DIR/swkb.dat" "$OUTPUT_DIR/swkb.dat"
 
