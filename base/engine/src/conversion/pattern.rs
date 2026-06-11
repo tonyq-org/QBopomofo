@@ -93,6 +93,76 @@ const DEFAULT_PATTERNS: &[ConstructionPattern] = &[
         max_gap: 8,
         bonus: PatternBonus(5.0),
     },
+    ConstructionPattern {
+        first_anchor: "雖然",
+        second_anchor: "但是",
+        min_gap: 1,
+        max_gap: 12,
+        bonus: PatternBonus(6.0),
+    },
+    ConstructionPattern {
+        first_anchor: "雖然",
+        second_anchor: "卻",
+        min_gap: 1,
+        max_gap: 12,
+        bonus: PatternBonus(5.0),
+    },
+    ConstructionPattern {
+        first_anchor: "不管",
+        second_anchor: "都",
+        min_gap: 1,
+        max_gap: 8,
+        bonus: PatternBonus(5.0),
+    },
+    ConstructionPattern {
+        first_anchor: "無論",
+        second_anchor: "都",
+        min_gap: 1,
+        max_gap: 8,
+        bonus: PatternBonus(5.0),
+    },
+    ConstructionPattern {
+        first_anchor: "除非",
+        second_anchor: "否則",
+        min_gap: 1,
+        max_gap: 12,
+        bonus: PatternBonus(6.0),
+    },
+    ConstructionPattern {
+        first_anchor: "即使",
+        second_anchor: "也",
+        min_gap: 1,
+        max_gap: 8,
+        bonus: PatternBonus(5.0),
+    },
+    ConstructionPattern {
+        first_anchor: "只要",
+        second_anchor: "就",
+        min_gap: 1,
+        max_gap: 12,
+        bonus: PatternBonus(5.0),
+    },
+    ConstructionPattern {
+        first_anchor: "只有",
+        second_anchor: "才",
+        min_gap: 1,
+        max_gap: 12,
+        bonus: PatternBonus(5.0),
+    },
+    ConstructionPattern {
+        first_anchor: "寧可",
+        second_anchor: "也不",
+        min_gap: 1,
+        max_gap: 8,
+        bonus: PatternBonus(6.0),
+    },
+    ConstructionPattern {
+        first_anchor: "一方面",
+        second_anchor: "另一方面",
+        min_gap: 1,
+        max_gap: 12,
+        bonus: PatternBonus(6.0),
+    },
 ];
 
 fn matches_pattern(tokens: &[&str], pattern: &ConstructionPattern) -> bool {
@@ -135,5 +205,23 @@ mod tests {
         let reranker = PatternReranker::default();
         assert!(reranker.score(&["不但", "快", "而且", "穩"]) > 0.0);
         assert!(reranker.score(&["如果", "下雨", "就", "回家"]) > 0.0);
+    }
+
+    #[test]
+    fn scores_additional_paired_constructions() {
+        let reranker = PatternReranker::default();
+        assert!(reranker.score(&["雖然", "累", "但是", "值得"]) > 0.0);
+        assert!(reranker.score(&["不管", "如何", "都", "要去"]) > 0.0);
+        assert!(reranker.score(&["除非", "下雨", "否則", "照常"]) > 0.0);
+        assert!(reranker.score(&["即使", "輸了", "也", "開心"]) > 0.0);
+        assert!(reranker.score(&["只要", "努力", "就", "成功"]) > 0.0);
+        assert!(reranker.score(&["只有", "你", "才", "知道"]) > 0.0);
+    }
+
+    #[test]
+    fn anchor_must_match_whole_token() {
+        let reranker = PatternReranker::default();
+        // 「雖然」 embedded in a longer token must not match.
+        assert_eq!(0.0, reranker.score(&["雖然如此", "累", "但是", "值得"]));
     }
 }

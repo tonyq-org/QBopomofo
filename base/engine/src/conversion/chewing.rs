@@ -333,7 +333,26 @@ impl ChewingEngine {
             if candidates.is_empty() {
                 break;
             }
-            candidates.sort_unstable_by_key(|k| k.len());
+            // Classic Yen's picks the next-shortest path by TOTAL COST, not by
+            // edge count. Sorting by len() can skip a low-cost multi-segment
+            // path in favour of a higher-cost few-segment one, so the emitted
+            // top-K loses correctness even though the final ranking step
+            // (paths.sort_by(...) on total_probability) hides it for K=1.
+            //
+            // NOTE: `Edge.cost` is overwritten inside `shortest_path` to hold
+            // the cumulative path cost from its source. Summing those would
+            // double-count root-path edges. The phrases table preserves the
+            // original per-edge log-prob, so look up cost there instead.
+            // Tiebreaker on length keeps the previous ordering for cost-equal
+            // candidates, which several Yen's-dependent tests rely on.
+            let path_cost = |path: &Vec<Edge>| -> f64 {
+                path.iter().map(|e| -phrases[e.sn].log_prob()).sum()
+            };
+            candidates.sort_unstable_by(|a, b| {
+                path_cost(a)
+                    .total_cmp(&path_cost(b))
+                    .then_with(|| a.len().cmp(&b.len()))
+            });
             ksp.push(candidates.swap_remove(0));
         }
         ksp.into_iter()

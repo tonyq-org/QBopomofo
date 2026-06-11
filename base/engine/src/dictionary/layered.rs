@@ -1,5 +1,3 @@
-use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
-
 use log::error;
 
 use super::{Dictionary, DictionaryInfo, Entries, LookupStrategy, Phrase, UpdateDictionaryError};
@@ -119,42 +117,44 @@ impl Dictionary for Layered {
     ///       Add phrases <- (phrase, freq)
     /// ```
     fn lookup(&self, syllables: &[Syllable], strategy: LookupStrategy) -> Vec<Phrase> {
-        let mut sort_map: BTreeMap<String, usize> = BTreeMap::new();
-        let mut phrases: Vec<Phrase> = Vec::new();
-
-        self.enabled_dicts().for_each(|d| {
+        // Hot path: called for every sub-range of the composition on every
+        // keystroke. Result sets are small (a few hundred at most for single
+        // syllables, usually ≤ 10 for phrases), so a linear merge into the
+        // result Vec beats building a BTreeMap keyed by freshly-allocated
+        // Strings on every call. The first dictionary seeds the list directly
+        // since a single dictionary never returns duplicate phrases.
+        let mut dicts = self.enabled_dicts();
+        let mut phrases: Vec<Phrase> = match dicts.next() {
+            Some(d) => d.lookup(syllables, strategy),
+            None => return vec![],
+        };
+        debug_assert!(phrases.iter().all(|p| !p.as_str().is_empty()));
+        for d in dicts {
             for phrase in d.lookup(syllables, strategy) {
                 debug_assert!(!phrase.as_str().is_empty());
-                match sort_map.entry(phrase.to_string()) {
-                    Entry::Occupied(entry) => {
-                        let index = *entry.get();
-                        phrases[index].freq = phrase.freq.max(phrases[index].freq);
-                        phrases[index].last_used =
-                            match (phrases[index].last_used, phrase.last_used) {
-                                (Some(orig), Some(new)) => Some(u64::max(orig, new)),
-                                (Some(orig), None) => Some(orig),
-                                (None, Some(new)) => Some(new),
-                                (None, None) => None,
-                            };
+                match phrases.iter_mut().find(|p| p.text == phrase.text) {
+                    Some(merged) => {
+                        merged.freq = phrase.freq.max(merged.freq);
+                        merged.last_used = match (merged.last_used, phrase.last_used) {
+                            (Some(orig), Some(new)) => Some(u64::max(orig, new)),
+                            (orig, new) => orig.or(new),
+                        };
                     }
-                    Entry::Vacant(entry) => {
-                        entry.insert(phrases.len());
-                        phrases.push(phrase);
-                    }
+                    None => phrases.push(phrase),
                 }
             }
-        });
+        }
 
         // Remove excluded
-        let excluded: BTreeSet<Box<str>> = self
+        let excluded: Vec<Box<str>> = self
             .exclusion_dicts()
             .flat_map(|d| d.lookup(syllables, strategy))
             .map(|p| p.text)
             .collect();
+        if !excluded.is_empty() {
+            phrases.retain(|p| !excluded.contains(&p.text));
+        }
         phrases
-            .into_iter()
-            .filter(|p| !excluded.contains(&p.text))
-            .collect()
     }
 
     /// Returns all entries from all dictionaries.
