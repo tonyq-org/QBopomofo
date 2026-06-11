@@ -37,6 +37,31 @@ macro_rules! qb_dbg {
     };
 }
 
+/// Write a slow-call log line. Always active regardless of QBOPOMOFO_DEBUG,
+/// because the caller already paid the slow-path cost — an extra file write
+/// is cheap relative to a 30 ms+ TSF stall, and we want this data without
+/// asking users to opt in.
+///
+/// Writes to `%TEMP%\qbopomofo_slow.log`.
+pub fn slow_log(msg: &str) {
+    let path = std::env::temp_dir().join("qbopomofo_slow.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(f, "[{}] {}", timestamp(), msg);
+    }
+}
+
+/// Convenience macro for slow-call logging (always active).
+#[macro_export]
+macro_rules! qb_slow {
+    ($($arg:tt)*) => {
+        $crate::debug_log::slow_log(&format!($($arg)*))
+    };
+}
+
 fn timestamp() -> String {
     // Simple timestamp using SystemTime
     use std::time::SystemTime;

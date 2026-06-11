@@ -86,9 +86,6 @@ impl Theme {
         }
     }
 
-    fn current() -> Self {
-        if is_dark_mode() { Self::dark() } else { Self::light() }
-    }
 }
 
 fn is_dark_mode() -> bool {
@@ -145,10 +142,17 @@ struct PaintData {
     page_info: String,
     font: HFONT,
     dpi: u32,
+    theme: Theme,
+    dark: bool,
+    bg_brush: HBRUSH,
+    border_brush: HBRUSH,
+    highlight_brush: HBRUSH,
 }
 
 impl PaintData {
     fn new(dpi: u32) -> Self {
+        let dark = is_dark_mode();
+        let theme = if dark { Theme::dark() } else { Theme::light() };
         Self {
             magic: PAINT_DATA_MAGIC,
             candidates: Vec::new(),
@@ -157,6 +161,11 @@ impl PaintData {
             page_info: String::new(),
             font: create_font(scale(BASE_FONT_PT, dpi)),
             dpi,
+            theme,
+            dark,
+            bg_brush: unsafe { CreateSolidBrush(theme.bg) },
+            border_brush: unsafe { CreateSolidBrush(theme.border) },
+            highlight_brush: unsafe { CreateSolidBrush(theme.highlight_bg) },
         }
     }
 
@@ -165,6 +174,36 @@ impl PaintData {
             unsafe { let _ = DeleteObject(self.font.into()); }
             self.font = create_font(scale(BASE_FONT_PT, new_dpi));
             self.dpi = new_dpi;
+        }
+    }
+
+    /// Re-check dark mode and rebuild cached brushes only when it changed.
+    /// Brushes (and the theme registry read) are cached because WM_PAINT
+    /// fires on every keystroke while candidates are visible — per-paint
+    /// CreateSolidBrush/DeleteObject churns GDI handles for no benefit.
+    fn ensure_theme(&mut self) {
+        let dark = is_dark_mode();
+        if dark == self.dark {
+            return;
+        }
+        self.dark = dark;
+        self.theme = if dark { Theme::dark() } else { Theme::light() };
+        unsafe {
+            let _ = DeleteObject(self.bg_brush.into());
+            let _ = DeleteObject(self.border_brush.into());
+            let _ = DeleteObject(self.highlight_brush.into());
+        }
+        self.bg_brush = unsafe { CreateSolidBrush(self.theme.bg) };
+        self.border_brush = unsafe { CreateSolidBrush(self.theme.border) };
+        self.highlight_brush = unsafe { CreateSolidBrush(self.theme.highlight_bg) };
+    }
+
+    fn delete_gdi_objects(&mut self) {
+        unsafe {
+            let _ = DeleteObject(self.font.into());
+            let _ = DeleteObject(self.bg_brush.into());
+            let _ = DeleteObject(self.border_brush.into());
+            let _ = DeleteObject(self.highlight_brush.into());
         }
     }
 }
@@ -181,6 +220,9 @@ pub struct CandidateWindow {
     hwnd: HWND,
     paint_data: *mut PaintData,
     last_pos: (i32, i32),
+    /// (w, h, radius) of the last applied window region — SetWindowRgn
+    /// forces a full recalc/repaint, so skip it when nothing changed.
+    last_rgn: (i32, i32, i32),
 }
 
 impl CandidateWindow {
@@ -219,6 +261,7 @@ impl CandidateWindow {
             hwnd,
             paint_data,
             last_pos: (100, 100),
+            last_rgn: (-1, -1, -1),
         }
     }
 
@@ -241,11 +284,12 @@ impl CandidateWindow {
             return;
         }
 
-        // Refresh DPI for this monitor & reallocate font if needed.
+        // Refresh DPI for this monitor & reallocate font/brushes if needed.
         let dpi = current_dpi(self.hwnd);
         unsafe {
             let pd = &mut *self.paint_data;
             pd.ensure_font(dpi);
+            pd.ensure_theme();
             pd.candidates = candidates.to_vec();
             pd.highlighted = highlighted.min(candidates.len().saturating_sub(1));
             pd.page_info = page_info.to_string();
@@ -255,12 +299,15 @@ impl CandidateWindow {
         let (w, h) = self.calc_size(dpi);
         let (fx, fy) = clamp_to_monitor(x, y + scale(24, dpi), w, h);
 
-        // Apply rounded-corner region.
-        unsafe {
-            let radius = scale(BASE_CORNER_RADIUS, dpi);
-            let rgn = CreateRoundRectRgn(0, 0, w, h, radius, radius);
-            let _ = SetWindowRgn(self.hwnd, Some(rgn), true);
-            // SetWindowRgn takes ownership of rgn — do not DeleteObject it.
+        // Apply rounded-corner region only when the size actually changed.
+        let radius = scale(BASE_CORNER_RADIUS, dpi);
+        if self.last_rgn != (w, h, radius) {
+            unsafe {
+                let rgn = CreateRoundRectRgn(0, 0, w, h, radius, radius);
+                let _ = SetWindowRgn(self.hwnd, Some(rgn), true);
+                // SetWindowRgn takes ownership of rgn — do not DeleteObject it.
+            }
+            self.last_rgn = (w, h, radius);
         }
 
         unsafe {
@@ -351,8 +398,8 @@ impl Drop for CandidateWindow {
             SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
             let _ = DestroyWindow(self.hwnd);
             if !self.paint_data.is_null() {
-                let pd = Box::from_raw(self.paint_data);
-                let _ = DeleteObject(pd.font.into());
+                let mut pd = Box::from_raw(self.paint_data);
+                pd.delete_gdi_objects();
             }
         }
     }
@@ -411,7 +458,9 @@ unsafe extern "system" fn candidate_wnd_proc(
 }
 
 fn paint_candidates(hwnd: HWND, pd: &PaintData) {
-    let theme = Theme::current();
+    // Theme + brushes are cached in PaintData (refreshed in show()) so the
+    // paint path does no registry reads and no GDI object churn.
+    let theme = pd.theme;
     let mut ps = PAINTSTRUCT::default();
     let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
 
@@ -430,14 +479,10 @@ fn paint_candidates(hwnd: HWND, pd: &PaintData) {
     };
 
     // Background.
-    let bg_brush: HBRUSH = unsafe { CreateSolidBrush(theme.bg) };
-    unsafe { FillRect(mem_dc, &full_rect, bg_brush) };
-    unsafe { let _ = DeleteObject(bg_brush.into()); }
+    unsafe { FillRect(mem_dc, &full_rect, pd.bg_brush) };
 
     // Border.
-    let border_brush: HBRUSH = unsafe { CreateSolidBrush(theme.border) };
-    unsafe { FrameRect(mem_dc, &full_rect, border_brush) };
-    unsafe { let _ = DeleteObject(border_brush.into()); }
+    unsafe { FrameRect(mem_dc, &full_rect, pd.border_brush) };
 
     let old_font = unsafe { SelectObject(mem_dc, pd.font.into()) };
     unsafe { SetBkMode(mem_dc, TRANSPARENT) };
@@ -451,21 +496,18 @@ fn paint_candidates(hwnd: HWND, pd: &PaintData) {
         let label = format!("{}. {}", key_ch, cand);
         let label_w: Vec<u16> = label.encode_utf16().collect();
 
-        let (fg, drew_highlight) = if i == pd.highlighted {
+        let fg = if i == pd.highlighted {
             let hl_rect = RECT {
                 left: padding / 2,
                 top: y,
                 right: client_w - padding / 2,
                 bottom: y + row_h,
             };
-            let hl_brush: HBRUSH = unsafe { CreateSolidBrush(theme.highlight_bg) };
-            unsafe { FillRect(mem_dc, &hl_rect, hl_brush) };
-            unsafe { let _ = DeleteObject(hl_brush.into()); }
-            (theme.highlight_fg, true)
+            unsafe { FillRect(mem_dc, &hl_rect, pd.highlight_brush) };
+            theme.highlight_fg
         } else {
-            (theme.fg, false)
+            theme.fg
         };
-        let _ = drew_highlight;
 
         unsafe { SetTextColor(mem_dc, fg) };
         unsafe { let _ = TextOutW(mem_dc, padding, y + padding / 4, &label_w); }

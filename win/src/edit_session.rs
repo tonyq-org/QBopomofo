@@ -96,12 +96,27 @@ impl ITfEditSession_Impl for QBEditSession_Impl {
     }
 }
 
+/// Threshold above which a TSF edit session is considered "slow" and
+/// gets logged to %TEMP%\qbopomofo_slow.log. RequestEditSession with
+/// TF_ES_SYNC blocks until the host app releases its document lock —
+/// when the host stalls (Electron, Office, some browsers), every
+/// keystroke pays that latency. The log lets us tell "our code is slow"
+/// from "the host is stalling us".
+const SLOW_EDIT_SESSION_MS: u128 = 30;
+
 /// Request a synchronous edit session.
 pub fn request_edit_session(
     context: &ITfContext,
     tid: u32,
     op: EditOp,
 ) -> windows::core::Result<Option<EditResult>> {
+    // Capture op label before the op is moved into QBEditSession.
+    let op_label: &'static str = match &op {
+        EditOp::UpdateComposition { .. } => "UpdateComposition",
+        EditOp::CommitText { .. } => "CommitText",
+        EditOp::EndComposition { .. } => "EndComposition",
+    };
+
     // Shared cell: the session callback writes the result here,
     // and we read it after RequestEditSession returns (sync).
     let result_cell: ResultCell = Rc::new(RefCell::new(None));
@@ -109,8 +124,9 @@ pub fn request_edit_session(
     let session = QBEditSession::new(context, op, Rc::clone(&result_cell));
     let session_itf: ITfEditSession = session.into();
 
-    crate::qb_dbg!("request_edit_session: calling RequestEditSession tid={}", tid);
+    crate::qb_dbg!("request_edit_session: calling RequestEditSession tid={} op={}", tid, op_label);
 
+    let start = std::time::Instant::now();
     let _hr = unsafe {
         context.RequestEditSession(
             tid,
@@ -118,8 +134,18 @@ pub fn request_edit_session(
             TF_ES_READWRITE | TF_ES_SYNC,
         )?
     };
+    let elapsed_ms = start.elapsed().as_millis();
 
-    crate::qb_dbg!("request_edit_session: done");
+    if elapsed_ms >= SLOW_EDIT_SESSION_MS {
+        crate::qb_slow!(
+            "RequestEditSession({}) took {}ms tid={}",
+            op_label,
+            elapsed_ms,
+            tid,
+        );
+    }
+
+    crate::qb_dbg!("request_edit_session: done in {}ms", elapsed_ms);
 
     // Since TF_ES_SYNC, the callback has already executed.
     // Extract the result from the shared cell.
