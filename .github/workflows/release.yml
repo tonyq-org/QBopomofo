@@ -1,23 +1,53 @@
 name: Release
 
+# Tag push (v*.*.*) builds and publishes a GitHub Release.
+# workflow_dispatch builds the same artifacts WITHOUT publishing a release —
+# use it to iterate on this workflow without burning tags.
+
 on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
-  build:
+  mac:
     runs-on: macos-latest
+    timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Compute version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            echo "plist_version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev.$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+            echo "plist_version=0.0.0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Detect signing secrets
+        id: signing
+        env:
+          P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          NOTARY_ID: ${{ secrets.APPLE_ID }}
+        run: |
+          echo "cert=$([[ -n "$P12" ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "notary=$([[ -n "$NOTARY_ID" ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - name: Build dictionary data
         run: bash data-provider/build.sh
@@ -32,7 +62,6 @@ jobs:
             ../target/aarch64-apple-darwin/release/libchewing_capi.a \
             ../target/x86_64-apple-darwin/release/libchewing_capi.a \
             -output ../target/release/libchewing_capi.a
-          echo "Universal library:"
           lipo -info ../target/release/libchewing_capi.a
 
       - name: Build universal Swift binary
@@ -48,7 +77,6 @@ jobs:
           ARM_BIN="$(LIBCHEWING_AUTO_BUILD_CARGO=0 swift build -c release --triple arm64-apple-macosx --show-bin-path)/QBopomofo"
           X86_BIN="$(LIBCHEWING_AUTO_BUILD_CARGO=0 swift build -c release --triple x86_64-apple-macosx --show-bin-path)/QBopomofo"
           lipo -create "$ARM_BIN" "$X86_BIN" -output .build/QBopomofo-universal
-          echo "Universal binary:"
           lipo -info .build/QBopomofo-universal
 
       - name: Assemble app bundle
@@ -79,19 +107,75 @@ jobs:
             fi
           done
 
-          # Inject version from tag
-          VERSION="${GITHUB_REF_NAME#v}"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP_BUNDLE/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${{ steps.version.outputs.plist_version }}" "$APP_BUNDLE/Contents/Info.plist"
 
-          # Ad-hoc code sign
-          codesign --deep --force --sign - "$APP_BUNDLE"
+      - name: Import signing certificate
+        if: steps.signing.outputs.cert == 'true'
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          CERT_PATH="$RUNNER_TEMP/qbopomofo-cert.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/qbopomofo-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
 
-          echo "Universal binary:"
-          lipo -info "$APP_BUNDLE/Contents/MacOS/QBopomofo"
+          printf '%s' "$APPLE_CERTIFICATE_P12" | base64 --decode > "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$CERT_PATH"
+
+          EXISTING_KEYCHAINS="$(security list-keychains -d user | tr -d '"')"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $EXISTING_KEYCHAINS
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | awk -F '"' '/Developer ID Application/ { print $2; exit }')"
+          if [[ -z "$IDENTITY" ]]; then
+            echo "No Developer ID Application identity found in certificate" >&2
+            security find-identity -v -p codesigning "$KEYCHAIN_PATH" >&2 || true
+            exit 1
+          fi
+          echo "SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "SIGNING_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Sign app (Developer ID)
+        if: steps.signing.outputs.cert == 'true'
+        run: |
+          codesign --force --options runtime --timestamp \
+            --sign "$SIGNING_IDENTITY" mac/.build/QBopomofo.app
+          codesign --verify --deep --strict mac/.build/QBopomofo.app
+
+      - name: Sign app (ad-hoc fallback)
+        if: steps.signing.outputs.cert != 'true'
+        run: |
+          echo "::warning::APPLE_CERTIFICATE_P12 secret not set — ad-hoc signing, Gatekeeper will block downloads"
+          codesign --force --deep --sign - mac/.build/QBopomofo.app
+
+      - name: Notarize and staple app
+        if: steps.signing.outputs.cert == 'true' && steps.signing.outputs.notary == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          ditto -c -k --keepParent mac/.build/QBopomofo.app "$RUNNER_TEMP/QBopomofo-notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/QBopomofo-notarize.zip" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple mac/.build/QBopomofo.app
+          xcrun stapler validate mac/.build/QBopomofo.app
 
       - name: Create DMG
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${{ steps.version.outputs.version }}"
           DMG_NAME="QBopomofo-${VERSION}-universal.dmg"
 
           mkdir -p dmg_staging
@@ -103,10 +187,98 @@ jobs:
             -ov -format UDZO \
             "$DMG_NAME"
 
+          if [[ -n "${SIGNING_IDENTITY:-}" ]]; then
+            codesign --force --sign "$SIGNING_IDENTITY" "$DMG_NAME"
+          fi
+
           echo "dmg_name=$DMG_NAME" >> "$GITHUB_ENV"
+
+      - name: Clean up signing keychain
+        if: always()
+        run: |
+          if [[ -n "${SIGNING_KEYCHAIN:-}" ]]; then
+            security delete-keychain "$SIGNING_KEYCHAIN" || true
+          fi
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-mac
+          path: ${{ env.dmg_name }}
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Compute version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-dev.$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build dictionary data
+        shell: bash
+        run: bash data-provider/build.sh
+
+      - name: Run engine tests
+        shell: bash
+        run: cargo test --manifest-path base/engine/Cargo.toml --lib
+
+      - name: Run Windows tests
+        shell: bash
+        run: cargo test --manifest-path win/Cargo.toml
+
+      - name: Build TIP DLL (release, static CRT)
+        shell: bash
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --manifest-path win/Cargo.toml --release
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $stage = 'pkg-stage/QBopomofo'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item win/target/release/qbopomofo_tip.dll $stage
+          Copy-Item data-provider/output/*.dat $stage
+          Copy-Item win/package/* $stage
+          $zip = "QBopomofo-$version-win-x64.zip"
+          Compress-Archive -Path "$stage" -DestinationPath $zip
+          echo "zip_name=$zip" >> $env:GITHUB_ENV
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-win
+          path: ${{ env.zip_name }}
+          if-no-files-found: error
+
+  release:
+    needs: [mac, windows]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.dmg_name }}
+          files: |
+            artifacts/release-mac/*.dmg
+            artifacts/release-win/*.zip
           generate_release_notes: true
