@@ -70,9 +70,15 @@ jobs:
           BUILD_TS=$(date '+%Y-%m-%d %H:%M:%S')
           echo "let kBuildTimestamp = \"$BUILD_TS\"" > Sources/BuildInfo.swift
 
-          # Build each arch separately (--arch x --arch y uses xcodebuild which can't resolve SPM plugins)
-          LIBCHEWING_AUTO_BUILD_CARGO=0 swift build -c release --triple arm64-apple-macosx
-          LIBCHEWING_AUTO_BUILD_CARGO=0 swift build -c release --triple x86_64-apple-macosx
+          # Build each arch separately (--arch x --arch y uses xcodebuild which can't resolve SPM plugins).
+          # The CargoBuild plugin is disabled (it only builds the host arch); the universal
+          # libchewing_capi.a was prebuilt in the previous step, so pass its absolute path to ld —
+          # the package's relative -L fallback doesn't resolve from the CI workspace layout.
+          CAPI_LIB_DIR="$GITHUB_WORKSPACE/base/engine/target/release"
+          LIBCHEWING_AUTO_BUILD_CARGO=0 swift build -c release --triple arm64-apple-macosx \
+            -Xlinker -L -Xlinker "$CAPI_LIB_DIR"
+          LIBCHEWING_AUTO_BUILD_CARGO=0 swift build -c release --triple x86_64-apple-macosx \
+            -Xlinker -L -Xlinker "$CAPI_LIB_DIR"
 
           ARM_BIN="$(LIBCHEWING_AUTO_BUILD_CARGO=0 swift build -c release --triple arm64-apple-macosx --show-bin-path)/QBopomofo"
           X86_BIN="$(LIBCHEWING_AUTO_BUILD_CARGO=0 swift build -c release --triple x86_64-apple-macosx --show-bin-path)/QBopomofo"

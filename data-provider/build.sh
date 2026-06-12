@@ -29,6 +29,10 @@ else
   exit 1
 fi
 
+# Windows Python defaults open() to the legacy locale codepage (cp950/cp1252),
+# which blows up on the UTF-8 CSV data. Force UTF-8 mode everywhere.
+export PYTHONUTF8=1
+
 # Git Bash paths (/c/...) are not understood by native Windows Python —
 # convert to mixed form (C:/...) when cygpath is available (no-op elsewhere).
 npath() {
