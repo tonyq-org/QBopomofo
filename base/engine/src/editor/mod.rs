@@ -80,6 +80,10 @@ pub struct EditorOptions {
     pub conversion_engine: ConversionEngineKind,
     pub enable_fullwidth_toggle_key: bool,
     pub sort_candidates_by_frequency: bool,
+    /// Keep longer phrase candidates ahead of shorter ones, then apply
+    /// frequency ordering within each phrase length. This only takes effect
+    /// when `sort_candidates_by_frequency` is enabled.
+    pub prefer_longer_candidates: bool,
     pub auto_snapshot_selections: bool,
 }
 
@@ -102,6 +106,7 @@ impl Default for EditorOptions {
             conversion_engine: ConversionEngineKind::ChewingEngine,
             enable_fullwidth_toggle_key: true,
             sort_candidates_by_frequency: false,
+            prefer_longer_candidates: false,
             auto_snapshot_selections: false,
         }
     }

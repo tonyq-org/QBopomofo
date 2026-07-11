@@ -89,7 +89,12 @@ impl ComposingSession {
     // MARK: - Shift handling
 
     /// Handle Shift key press/release. Returns true if mode changed.
-    pub fn handle_shift(&mut self, is_down: bool, prefs: &ModePreferences, chinese_buffer: &str) -> bool {
+    pub fn handle_shift(
+        &mut self,
+        is_down: bool,
+        prefs: &ModePreferences,
+        chinese_buffer: &str,
+    ) -> bool {
         match prefs.shift_behavior {
             ShiftBehavior::None => false,
             ShiftBehavior::SmartToggle => {
@@ -106,7 +111,10 @@ impl ComposingSession {
                         self.is_english = !self.is_english;
                         self.record_mode_switch(was_english, chinese_buffer);
                         changed = true;
-                    } else if self.shift_held && self.shift_typed_while_held && self.was_chinese_before_shift {
+                    } else if self.shift_held
+                        && self.shift_typed_while_held
+                        && self.was_chinese_before_shift
+                    {
                         // Hold released — back to Chinese
                         self.record_mode_switch(true, chinese_buffer);
                         self.is_english = false;
@@ -145,6 +153,12 @@ impl ComposingSession {
     /// If empty and no segments exist, returns `true` to indicate the caller
     /// should directly commit this character (no Chinese context).
     pub fn type_english(&mut self, ch: char, chinese_buffer: &str) -> bool {
+        // Keep recorded Chinese segment boundaries aligned before adding a new
+        // English run.  The conversion engine can re-segment earlier text on
+        // every keystroke, so snapshots from the previous mode switch are not
+        // necessarily still byte-for-byte prefixes of the current display.
+        self.resync_chinese(chinese_buffer);
+
         if self.shift_held {
             self.shift_typed_while_held = true;
             self.is_english = true;
@@ -176,7 +190,8 @@ impl ComposingSession {
                     self.segments.push(Segment::Chinese(delta.to_string()));
                 }
             } else if already.is_empty() {
-                self.segments.push(Segment::Chinese(chinese_buffer.to_string()));
+                self.segments
+                    .push(Segment::Chinese(chinese_buffer.to_string()));
             }
         }
 
@@ -210,6 +225,13 @@ impl ComposingSession {
             return true;
         }
         false
+    }
+
+    /// Finalize the current inline English buffer without changing the
+    /// persistent Shift-controlled language mode. Windows uses this when Caps
+    /// Lock temporarily supplies English input and is then turned off.
+    pub fn finish_english_run(&mut self, chinese_buffer: &str) {
+        self.record_mode_switch(true, chinese_buffer);
     }
 
     // MARK: - Cursor-aware editing
@@ -251,7 +273,12 @@ impl ComposingSession {
     ///
     /// For Chinese regions (Segment::Chinese or RemainingChinese), returns the character
     /// offset within the chewing buffer. For non-Chinese regions, returns -1.
-    pub fn display_to_chewing_cursor(&self, pos: usize, chinese_buffer: &str, bopomofo: &str) -> i32 {
+    pub fn display_to_chewing_cursor(
+        &self,
+        pos: usize,
+        chinese_buffer: &str,
+        bopomofo: &str,
+    ) -> i32 {
         let mut offset = 0;
         let mut chinese_chars_before = 0usize;
 
@@ -294,6 +321,33 @@ impl ComposingSession {
 
         // At or past end — return total Chinese chars (cursor at end)
         chinese_chars_before as i32
+    }
+
+    /// Convert a chewing Chinese cursor offset into a character offset in the
+    /// interleaved mixed display. English segments anchored at that Chinese
+    /// boundary are placed before the next bopomofo/Chinese character.
+    pub fn chewing_to_display_cursor(&self, chinese_pos: usize, chinese_buffer: &str) -> usize {
+        let mut display_offset = 0usize;
+        let mut chinese_consumed = 0usize;
+
+        for segment in &self.segments {
+            match segment {
+                Segment::Chinese(text) => {
+                    let len = text.chars().count();
+                    if chinese_pos < chinese_consumed + len {
+                        return display_offset + (chinese_pos - chinese_consumed);
+                    }
+                    chinese_consumed += len;
+                    display_offset += len;
+                }
+                Segment::English(text) => {
+                    display_offset += text.chars().count();
+                }
+            }
+        }
+
+        let remaining_len = self.remaining_chinese(chinese_buffer).chars().count();
+        display_offset + chinese_pos.saturating_sub(chinese_consumed).min(remaining_len)
     }
 
     /// Map a display character position to a region in the underlying data structure.
@@ -352,6 +406,8 @@ impl ComposingSession {
         chinese_buffer: &str,
         bopomofo: &str,
     ) -> bool {
+        self.resync_chinese(chinese_buffer);
+
         match self.map_display_position(cursor, chinese_buffer, bopomofo) {
             Some((1, seg_idx, char_offset)) => {
                 // English segment
@@ -439,6 +495,8 @@ impl ComposingSession {
     /// Delete the character before the given display cursor position.
     /// Returns: 0 = nothing to delete, 1 = English char deleted, 2 = Chinese region (delegate to chewing).
     pub fn delete_at(&mut self, cursor: usize, chinese_buffer: &str, bopomofo: &str) -> i32 {
+        self.resync_chinese(chinese_buffer);
+
         if cursor == 0 {
             return 0;
         }
@@ -452,12 +510,10 @@ impl ComposingSession {
                     }
                     if text.is_empty() {
                         self.segments.remove(seg_idx);
-                        // Remove preceding Chinese snapshot (chewing buffer is source of truth)
-                        if seg_idx > 0 {
-                            if matches!(self.segments.get(seg_idx - 1), Some(Segment::Chinese(_))) {
-                                self.segments.remove(seg_idx - 1);
-                            }
-                        }
+                        // Keep surrounding Chinese snapshots: this English run
+                        // may be in the middle of several interleaved runs, and
+                        // removing its preceding anchor would make the later
+                        // snapshots cease to be a prefix of the live buffer.
                     }
                 }
                 1
@@ -481,19 +537,71 @@ impl ComposingSession {
     /// slice of the chewing buffer; this method re-reads those slices from the
     /// updated buffer so snapshots stay in sync.
     pub fn resync_chinese(&mut self, new_chinese_buffer: &str) {
-        let mut chars_consumed = 0;
+        if self.chinese_snapshot == new_chinese_buffer {
+            return;
+        }
+
+        let old_chars: Vec<char> = self.chinese_snapshot.chars().collect();
+        let new_chars: Vec<char> = new_chinese_buffer.chars().collect();
+
+        // Find the single changed span using a common prefix/suffix.  Conversion
+        // changes are normally a replacement of one span (candidate change,
+        // re-segmentation, insertion, or deletion).  Mapping segment boundaries
+        // through that span preserves where English runs were inserted even when
+        // the number of Chinese characters before them changes.
+        let mut prefix = 0usize;
+        while prefix < old_chars.len()
+            && prefix < new_chars.len()
+            && old_chars[prefix] == new_chars[prefix]
+        {
+            prefix += 1;
+        }
+
+        let mut suffix = 0usize;
+        while suffix < old_chars.len().saturating_sub(prefix)
+            && suffix < new_chars.len().saturating_sub(prefix)
+            && old_chars[old_chars.len() - 1 - suffix] == new_chars[new_chars.len() - 1 - suffix]
+        {
+            suffix += 1;
+        }
+
+        let old_change_end = old_chars.len().saturating_sub(suffix);
+        let new_change_len = new_chars.len().saturating_sub(prefix + suffix);
+
+        let map_boundary = |old_boundary: usize| -> usize {
+            if old_chars.is_empty() {
+                return old_boundary.min(new_chars.len());
+            }
+            if old_boundary <= prefix {
+                old_boundary
+            } else if old_boundary <= old_change_end {
+                prefix + (old_boundary - prefix).min(new_change_len)
+            } else {
+                let removed = old_change_end - prefix;
+                old_boundary
+                    .saturating_sub(removed)
+                    .saturating_add(new_change_len)
+            }
+            .min(new_chars.len())
+        };
+
+        let mut old_chars_consumed = 0usize;
+        let mut new_chars_consumed = 0usize;
         for seg in &mut self.segments {
             if let Segment::Chinese(text) = seg {
                 let old_char_count = text.chars().count();
-                let new_text: String = new_chinese_buffer
-                    .chars()
-                    .skip(chars_consumed)
-                    .take(old_char_count)
-                    .collect();
+                old_chars_consumed += old_char_count;
+                let new_end = map_boundary(old_chars_consumed).max(new_chars_consumed);
+                let new_text: String = new_chars[new_chars_consumed..new_end].iter().collect();
                 *text = new_text;
-                chars_consumed += old_char_count;
+                new_chars_consumed = new_end;
             }
         }
+
+        self.segments
+            .retain(|seg| !matches!(seg, Segment::Chinese(text) if text.is_empty()));
+        self.chinese_snapshot.clear();
+        self.chinese_snapshot.push_str(new_chinese_buffer);
     }
 
     // MARK: - Commit
@@ -536,6 +644,11 @@ impl ComposingSession {
     ///
     /// `final_chinese` is the committed text from chewing_handle_Enter().
     pub fn commit_all(&mut self, final_chinese: &str) -> String {
+        // Commit is the last line of defence: callers should resync while
+        // rendering, but doing it here prevents a stale snapshot from ever
+        // duplicating the final Chinese buffer.
+        self.resync_chinese(final_chinese);
+
         let mut result = String::new();
 
         // Replay segments
@@ -584,10 +697,13 @@ impl ComposingSession {
     // MARK: - Internal
 
     fn record_mode_switch(&mut self, from_english: bool, chinese_buffer: &str) {
+        self.resync_chinese(chinese_buffer);
+
         if from_english {
             // Switching FROM English → Chinese: save English segment
             if !self.english_buffer.is_empty() {
-                self.segments.push(Segment::English(self.english_buffer.clone()));
+                self.segments
+                    .push(Segment::English(self.english_buffer.clone()));
                 self.english_buffer.clear();
             }
         } else {
@@ -610,7 +726,8 @@ impl ComposingSession {
                         self.segments.push(Segment::Chinese(delta.to_string()));
                     }
                 } else if already.is_empty() {
-                    self.segments.push(Segment::Chinese(chinese_buffer.to_string()));
+                    self.segments
+                        .push(Segment::Chinese(chinese_buffer.to_string()));
                 }
                 self.chinese_snapshot = chinese_buffer.to_string();
             }
@@ -756,26 +873,67 @@ mod tests {
         assert_eq!(session.commit_all("甲乙丁戊"), "甲乙丁x戊");
     }
 
-    /// Same scenario but WITHOUT resync — demonstrates the bug
+    /// Commit performs a final resync even if the platform forgot to do it
+    /// while rendering.
     #[test]
-    fn commit_duplicates_without_resync_after_resegmentation() {
+    fn commit_auto_resyncs_after_resegmentation() {
         let mut session = ComposingSession::new();
 
         // Chinese buffer = "甲乙丙", insert English "x" at end
         assert!(session.insert_english_at('x', 3, "甲乙丙", ""));
         assert_eq!(session.build_display("甲乙丙", ""), "甲乙丙x");
 
-        // Engine re-segments: buffer changes to "甲乙丁戊"
-        // WITHOUT calling resync_chinese, the snapshot is stale
-        // build_display should still work reasonably, but it doesn't:
-        let display = session.build_display("甲乙丁戊", "");
-        // BUG: this produces "甲乙丙x甲乙丁戊" because remaining_chinese
-        // can't match the stale snapshot prefix and returns the full buffer
-        assert_eq!(display, "甲乙丙x甲乙丁戊", "Known bug: stale snapshot causes full buffer duplication in display");
-
-        // And commit also duplicates:
+        // Engine re-segments, and the platform goes straight to commit without
+        // an intervening display update/resync.
         let committed = session.commit_all("甲乙丁戊");
-        // BUG: "甲乙丙x甲乙丁戊" — Chinese text duplicated
-        assert_eq!(committed, "甲乙丙x甲乙丁戊", "Known bug: stale snapshot causes full buffer duplication in commit");
+        assert_eq!(committed, "甲乙丁x戊");
+    }
+
+    #[test]
+    fn resync_moves_multiple_english_boundaries_after_chinese_deletion() {
+        let mut session = ComposingSession::new();
+
+        assert!(session.insert_english_at('x', 2, "甲乙丙丁", ""));
+        assert!(session.insert_english_at('y', 5, "甲乙丙丁", ""));
+        assert_eq!(session.build_display("甲乙丙丁", ""), "甲乙x丙丁y");
+
+        // Delete 乙, which is before both English boundaries.
+        session.resync_chinese("甲丙丁");
+        assert_eq!(session.build_display("甲丙丁", ""), "甲x丙丁y");
+        assert_eq!(session.commit_all("甲丙丁"), "甲x丙丁y");
+    }
+
+    #[test]
+    fn finalizing_caps_english_keeps_future_chinese_after_it() {
+        let mut session = ComposingSession::new();
+
+        assert!(!session.type_english('A', "甲"));
+        session.finish_english_run("甲");
+
+        assert_eq!(session.build_display("甲乙", ""), "甲A乙");
+        assert_eq!(session.commit_all("甲乙"), "甲A乙");
+    }
+
+    #[test]
+    fn maps_chewing_cursor_across_inline_english() {
+        let mut session = ComposingSession::new();
+        assert!(session.insert_english_at('x', 1, "甲乙", ""));
+
+        assert_eq!(session.build_display("甲乙", ""), "甲x乙");
+        assert_eq!(session.chewing_to_display_cursor(0, "甲乙"), 0);
+        assert_eq!(session.chewing_to_display_cursor(1, "甲乙"), 2);
+        assert_eq!(session.chewing_to_display_cursor(2, "甲乙"), 3);
+    }
+
+    #[test]
+    fn deleting_middle_english_keeps_later_run_anchored() {
+        let mut session = ComposingSession::new();
+        assert!(session.insert_english_at('x', 1, "甲乙", ""));
+        assert!(session.insert_english_at('y', 3, "甲乙", ""));
+        assert_eq!(session.build_display("甲乙", ""), "甲x乙y");
+
+        assert_eq!(session.delete_at(2, "甲乙", ""), 1);
+        assert_eq!(session.build_display("甲乙", ""), "甲乙y");
+        assert_eq!(session.commit_all("甲乙"), "甲乙y");
     }
 }

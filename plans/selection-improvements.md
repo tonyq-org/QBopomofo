@@ -158,6 +158,8 @@ candidates.sort_unstable_by(|a, b|
 
 ### T2-G：Selection 視窗排序與 path 排序一致化
 
+> 2026-07-11 Windows 先落地可切換的「智慧排序」：長詞優先、同長度依詞頻，並去除重複候選；設定頁仍可切回純詞頻或傳統字典順序。這是保守版本，尚未把 path 的完整 probability score 直接套到 selection window。
+
 **問題位置**：
 - Path 排序：`conversion/chewing.rs:213`（依 `log(freq) + length_penalty`）
 - 候選視窗排序：`editor/selection/phrase.rs:257-259`（依 `phrase.freq()` 降序）

@@ -108,10 +108,10 @@
 - **驗證**: 2026-03-30
 
 ### V-037: 組字區超過 20 字自動 flush
-- **操作**: 切換英文模式 → 連續打超過 20 個英文字母
-- **預期**: 超過 20 字時自動 commit，組字區清空
-- **說明**: 中文+英文合計組字區顯示超過 20 字即觸發 auto-flush commitAll。純英文時完全 flush，混合時整段 flush
-- **驗證**: 2026-03-30
+- **操作**: 輸入中文 → 插入英文 → 繼續輸入，讓中英混合組字區超過 20 字
+- **預期**: 只 commit 一次完整 mixed display，中文引擎與 mixed session 同時清空，不得留下第二段重複內容
+- **說明**: 純英文且沒有中文組字時由應用程式原生處理；只有 mixed composition 需要整段原子 auto-flush
+- **驗證**: 2026-07-11（Windows automated regression test）
 
 ---
 
@@ -140,6 +140,16 @@
 - **操作**: 設定每頁候選字為 5 → 打出候選字
 - **預期**: 每頁最多顯示 5 個候選字
 - **驗證**: 待驗證
+
+### V-052: Windows 原生設定頁
+- **操作**: 從開始功能表或 TSF 的設定入口開啟「Q注音設定」→ 修改候選數與選字鍵 → 儲存
+- **預期**: 設定寫入 `HKCU\Software\QBopomofo`，重新切換輸入法後生效
+- **驗證**: 2026-07-11（視窗啟動與偏好序列化自動測試）
+
+### V-053: 智慧候選排序
+- **操作**: 選擇「智慧排序」後開啟包含長詞、短詞與同音字的候選頁
+- **預期**: 長詞優先；相同長度依詞頻排列；重複候選只出現一次
+- **驗證**: 2026-07-11（engine + Windows controller regression tests）
 
 ---
 
@@ -170,3 +180,10 @@
 | B-007 | 按住 Shift 打英文順序錯誤（未 snapshot 中文） | 2026-03-30 | `d2ff455` |
 | B-008 | Backspace 無法刪除已存入 segment 的英文，且刪完英文後 Chinese snapshot 未清除導致重複顯示 | 2026-03-30 | `f3a5edd` |
 | B-009 | 按住 Shift + 標點鍵（如 `,`）產生英文 `<` 而非中文「，」，且放開 Shift 後誤切英文模式。原因：(1) 所有 ASCII 都走 temp English；(2) 非字母鍵未標記 shift_typed_while_held | 2026-03-30 | 待 commit |
+| B-010 | Windows mixed session 未 resync 中文 snapshot；重新斷詞或選字後 commit 會重複整段中文 | 2026-07-11 | 本次修正 |
+| B-011 | Windows mixed auto-commit 把引擎的部分 prefix 當完整內容 commit，session 清除但引擎仍留 20 字，造成兩次 commit 與重複文字 | 2026-07-11 | 本次修正 |
+| B-012 | Windows 忽略 `RequestEditSession` 的 inner HRESULT，失敗時仍丟棄 composition handle | 2026-07-11 | 本次修正 |
+| B-013 | Windows `OnCompositionTerminated` 未檢查 composition identity，且同步 callback 可能重入已借用的 controller | 2026-07-11 | 本次修正 |
+| B-014 | Windows 在 `OnTestKeyDown` 與 `OnKeyDown` 重複呼叫具狀態的 `ToUnicode`，可能重複消耗 dead-key state | 2026-07-11 | 本次修正 |
+| B-015 | 刪除中間 English segment 時一併移除前方 Chinese anchor，造成後續中英段落順序與內容重複 | 2026-07-11 | 本次修正 |
+| B-016 | Windows 未套用候選詞頻排序，候選頁沿用字典儲存順序，且沒有可調整的設定 UI | 2026-07-11 | 本次修正 |

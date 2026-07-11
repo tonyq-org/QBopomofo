@@ -1,13 +1,14 @@
 //! Diagnostic: check Q注音 TSF registration and try to activate it.
 
+use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::UI::TextServices::{
-    ITfInputProcessorProfileMgr, ITfInputProcessorProfiles,
+    ITfFnConfigure, ITfFunctionProvider, ITfInputProcessorProfileMgr, ITfInputProcessorProfiles,
     CLSID_TF_InputProcessorProfiles, TF_INPUTPROCESSORPROFILE,
 };
-use windows::core::{Interface, GUID};
+use windows::core::{GUID, IUnknown, Interface};
 
 const CLSID_QBOPOMOFO: GUID = GUID::from_values(
     0xA7E3B4C1, 0x9F2D, 0x4E5A,
@@ -29,6 +30,7 @@ fn guid_str(g: &GUID) -> String {
 }
 
 fn main() {
+    let show_settings = std::env::args().any(|arg| arg == "--show-settings");
     let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
 
     let profiles: ITfInputProcessorProfiles = unsafe {
@@ -37,6 +39,28 @@ fn main() {
     .expect("Failed to create ITfInputProcessorProfiles");
 
     println!("=== Q注音 Status ===");
+
+    println!("\n=== COM configuration function ===");
+    let service: windows::core::Result<IUnknown> = unsafe {
+        CoCreateInstance(&CLSID_QBOPOMOFO, None, CLSCTX_INPROC_SERVER)
+    };
+    let configure = service
+        .and_then(|service| service.cast::<ITfFunctionProvider>())
+        .and_then(|provider| unsafe {
+            provider.GetFunction(&GUID::zeroed(), &ITfFnConfigure::IID)
+        })
+        .and_then(|function| function.cast::<ITfFnConfigure>());
+    match &configure {
+        Ok(_) => println!("ITfFnConfigure: available"),
+        Err(error) => println!("ITfFnConfigure error: {:?}", error),
+    }
+    if show_settings && let Ok(configure) = configure
+    {
+        match unsafe { configure.Show(HWND::default(), LANG_ID, &GUID_PROFILE) } {
+            Ok(()) => println!("ITfFnConfigure::Show: OK"),
+            Err(error) => println!("ITfFnConfigure::Show error: {:?}", error),
+        }
+    }
 
     // Check enabled
     match unsafe { profiles.IsEnabledLanguageProfile(&CLSID_QBOPOMOFO, LANG_ID, &GUID_PROFILE) } {
@@ -92,7 +116,9 @@ fn main() {
     let _ = unsafe { profiles.GetActiveLanguageProfile(&CLSID_QBOPOMOFO, &mut active_lang, &mut active_profile) };
     println!("Active lang={:#06x} profile={}", active_lang, guid_str(&active_profile));
 
-    println!("\nDone. Press Enter to exit...");
-    let mut buf = String::new();
-    std::io::stdin().read_line(&mut buf).ok();
+    if !show_settings {
+        println!("\nDone. Press Enter to exit...");
+        let mut buf = String::new();
+        std::io::stdin().read_line(&mut buf).ok();
+    }
 }

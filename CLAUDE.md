@@ -128,6 +128,7 @@ tail -f /tmp/qbopomofo.log
 |------|------|
 | `cargo run --bin dev_harness` | 無 COM、無視窗的 CLI；stdin 打 `TYPE 5j/` / `KEY 0x0D` 驗輸入邏輯；設 `CHEWING_PATH` |
 | `win/run-dev.ps1` | 一鍵 build + 跑 `dev_host.exe`。**不是真 TSF host**：直接 link `Controller` + `CandidateWindow`，在 message pump 攔 `WM_KEYDOWN` 餵給 controller，commit 走 `EM_REPLACESEL`、preedit 顯示在標題列、候選用 `CandidateWindow`。驗輸入邏輯 + 候選視窗視覺，無 admin 無 regsvr32 |
+| `cargo run --bin qbopomofo_settings` | 啟動 Windows 原生設定頁；偏好寫入 `HKCU\Software\QBopomofo`。正式包另建立「Q注音設定」開始功能表捷徑 |
 | `win/install.ps1` | 正式 TSF 註冊到系統（HKLM regsvr32）。需要測 TSF edit session / composition lifecycle / 跨 app 行為時用這條 |
 
 ### 部署踩坑紀錄

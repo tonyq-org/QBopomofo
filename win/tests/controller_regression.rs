@@ -1,36 +1,98 @@
-use std::{cell::RefCell, path::PathBuf};
+use std::{
+    cell::{Cell, RefCell},
+    path::PathBuf,
+};
 
-use qbopomofo_tip::controller::{Controller, InputSink, VK_RETURN};
+use qbopomofo_tip::controller::{
+    Controller, InputSink, VK_BACK, VK_DOWN, VK_LEFT, VK_RETURN, VK_SHIFT, VK_UP,
+};
+use qbopomofo_tip::preferences::{CandidateOrdering, Preferences};
+use chewing::typing_mode::CapsLockBehavior;
 
 #[derive(Default)]
 struct RecordingSink {
     preedits: RefCell<Vec<String>>,
+    cursors_utf16: RefCell<Vec<usize>>,
     commits: RefCell<Vec<String>>,
+    candidate_pages: RefCell<Vec<Vec<String>>>,
+    candidate_highlights: RefCell<Vec<usize>>,
+    commit_failures_remaining: Cell<usize>,
+    end_preedit_count: Cell<usize>,
 }
 
 impl InputSink for RecordingSink {
-    fn update_preedit(&self, text: &str) -> Option<(i32, i32)> {
+    fn update_preedit(
+        &self,
+        text: &str,
+        cursor_utf16: usize,
+        _needs_caret_position: bool,
+        _update_selection: bool,
+    ) -> Option<(i32, i32)> {
         self.preedits.borrow_mut().push(text.to_string());
+        self.cursors_utf16.borrow_mut().push(cursor_utf16);
         None
     }
 
-    fn commit_text(&self, text: &str) {
+    fn commit_text(&self, text: &str) -> bool {
+        let failures = self.commit_failures_remaining.get();
+        if failures > 0 {
+            self.commit_failures_remaining.set(failures - 1);
+            return false;
+        }
         self.commits.borrow_mut().push(text.to_string());
+        true
     }
 
-    fn end_preedit(&self) {}
+    fn end_preedit(&self) -> bool {
+        self.end_preedit_count
+            .set(self.end_preedit_count.get() + 1);
+        true
+    }
 
     fn show_candidates(
         &self,
-        _cands: &[String],
+        cands: &[String],
         _selection_keys: &[char],
-        _highlight: usize,
+        highlight: usize,
         _page_info: &str,
         _caret_pos: Option<(i32, i32)>,
     ) {
+        self.candidate_pages.borrow_mut().push(cands.to_vec());
+        self.candidate_highlights.borrow_mut().push(highlight);
     }
 
     fn hide_candidates(&self) {}
+}
+
+#[test]
+fn smart_candidates_put_default_first_and_arrow_navigation_wraps() {
+    let prefs = Preferences {
+        candidate_ordering: CandidateOrdering::Smart,
+        ..Preferences::default()
+    };
+    let Some(mut controller) = activated_controller_with_preferences(&prefs) else {
+        return;
+    };
+    let sink = RecordingSink::default();
+
+    type_chars(&mut controller, "hk4", &sink); // 測
+    controller.on_key_down(VK_DOWN, '\0', false, false, false, &sink);
+
+    let page = sink.candidate_pages.borrow().last().cloned().unwrap();
+    assert_eq!(page.first().map(String::as_str), Some("測"));
+    assert!(page.len() > 1);
+
+    controller.on_key_down(VK_UP, '\0', false, false, false, &sink);
+    assert_eq!(
+        sink.candidate_highlights.borrow().last().copied(),
+        Some(page.len() - 1)
+    );
+    controller.on_key_down(VK_DOWN, '\0', false, false, false, &sink);
+    assert_eq!(sink.candidate_highlights.borrow().last().copied(), Some(0));
+
+    controller.on_key_down(VK_RETURN, '\r', false, false, false, &sink);
+    assert!(!controller.is_selecting());
+    assert_eq!(sink.preedits.borrow().last().map(String::as_str), Some("測"));
 }
 
 #[test]
@@ -113,11 +175,327 @@ fn tuned_single_char_zhu_prefers_zhu3_master_over_cook() {
     assert_eq!(sink.commits.borrow().concat(), "主");
 }
 
+#[test]
+fn mixed_chinese_english_chinese_commits_in_display_order() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+
+    type_chars(&mut controller, "hk4g4", &sink); // 測試
+    type_temporary_english(&mut controller, "A", &sink);
+    type_chars(&mut controller, "hk4", &sink); // 測
+    controller.on_key_down(VK_RETURN, '\r', false, false, false, &sink);
+
+    assert_eq!(
+        sink.preedits.borrow().last().map(String::as_str),
+        Some("測試A測")
+    );
+    assert_eq!(sink.commits.borrow().as_slice(), ["測試A測"]);
+}
+
+#[test]
+fn mixed_visible_length_auto_flushes_without_repeating_prefix() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+
+    type_syllable_n(&mut controller, "hk4", 5, &sink);
+    type_temporary_english(&mut controller, "A", &sink);
+    type_syllable_n(&mut controller, "hk4", 15, &sink);
+
+    let expected = format!("{}A{}", "測".repeat(5), "測".repeat(15));
+    assert_eq!(
+        sink.commits.borrow().as_slice(),
+        std::slice::from_ref(&expected)
+    );
+    assert!(
+        !controller.has_content(),
+        "auto-flush must clear editor and mixed session together"
+    );
+
+    // Continue after the automatic flush. The next commit must contain only
+    // the newly typed character, never chewing's old retained prefix.
+    type_chars(&mut controller, "hk4", &sink);
+    controller.on_key_down(VK_RETURN, '\r', false, false, false, &sink);
+    assert_eq!(
+        sink.commits.borrow().as_slice(),
+        [expected, "測".to_string()]
+    );
+    assert_eq!(
+        sink.commits.borrow().concat(),
+        format!("{}A{}", "測".repeat(5), "測".repeat(16))
+    );
+}
+
+#[test]
+fn mixed_backspace_after_returning_to_chinese_deletes_english() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+
+    type_chars(&mut controller, "hk4", &sink); // 測
+    type_temporary_english(&mut controller, "A", &sink);
+    controller.on_key_down(VK_BACK, '\0', false, false, false, &sink);
+
+    assert_eq!(
+        sink.preedits.borrow().last().map(String::as_str),
+        Some("測")
+    );
+    controller.on_key_down(VK_RETURN, '\r', false, false, false, &sink);
+    assert_eq!(sink.commits.borrow().as_slice(), ["測"]);
+}
+
+#[test]
+fn mixed_cursor_can_insert_inside_english_run() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+
+    type_chars(&mut controller, "hk4g4", &sink); // 測試
+    type_temporary_english(&mut controller, "A", &sink);
+    controller.on_key_down(VK_LEFT, '\0', false, false, false, &sink);
+
+    // Short Shift toggles persistent English mode, then b is inserted before A.
+    controller.on_key_down(VK_SHIFT, '\0', true, false, false, &sink);
+    controller.on_key_up(VK_SHIFT, &sink);
+    controller.on_key_down(0x42, 'b', false, false, false, &sink);
+
+    assert_eq!(
+        sink.preedits.borrow().last().map(String::as_str),
+        Some("測試bA")
+    );
+    assert_eq!(sink.cursors_utf16.borrow().last().copied(), Some(3));
+}
+
+#[test]
+fn mixed_cursor_can_delete_an_earlier_english_run() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+
+    type_chars(&mut controller, "hk4", &sink); // 測
+    type_temporary_english(&mut controller, "A", &sink);
+    type_chars(&mut controller, "g4", &sink); // 試
+    type_temporary_english(&mut controller, "B", &sink);
+    controller.on_key_down(VK_LEFT, '\0', false, false, false, &sink);
+    controller.on_key_down(VK_LEFT, '\0', false, false, false, &sink);
+    controller.on_key_down(VK_BACK, '\0', false, false, false, &sink);
+
+    assert_eq!(
+        sink.preedits.borrow().last().map(String::as_str),
+        Some("測試B")
+    );
+    controller.on_key_down(VK_RETURN, '\r', false, false, false, &sink);
+    assert_eq!(sink.commits.borrow().as_slice(), ["測試B"]);
+}
+
+#[test]
+fn english_without_composition_is_passed_through() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+
+    controller.on_key_down(VK_SHIFT, '\0', true, false, false, &sink);
+    controller.on_key_up(VK_SHIFT, &sink);
+
+    assert!(!controller.should_eat_key_down(0x41, 'a', false, false));
+    assert!(!controller.on_key_down(0x41, 'a', false, false, false, &sink));
+    assert!(sink.commits.borrow().is_empty());
+}
+
+#[test]
+fn rejected_platform_commit_is_retried_without_duplication() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+    sink.commit_failures_remaining.set(1);
+
+    type_chars(&mut controller, "hk4", &sink); // 測
+    controller.on_key_down(VK_RETURN, '\r', false, false, false, &sink);
+    assert!(sink.commits.borrow().is_empty());
+    assert!(
+        controller.has_content(),
+        "pending commit must keep the next key routed to us"
+    );
+
+    // Even an unmapped key is routed through us once, so the pending commit
+    // cannot remain stranded or be reordered behind application input.
+    assert!(controller.should_eat_key_down(0x70, '\0', false, false)); // F1
+    assert!(!controller.on_key_down(0x70, '\0', false, false, false, &sink));
+    assert_eq!(sink.commits.borrow().as_slice(), ["測"]);
+
+    controller.on_key_down(0x48, 'h', false, false, false, &sink);
+    assert_eq!(
+        sink.preedits.borrow().last().map(String::as_str),
+        Some("ㄘ")
+    );
+}
+
+#[test]
+fn numpad_digit_is_inserted_inline_during_chinese_composition() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+
+    type_chars(&mut controller, "hk4h", &sink); // 測 + unfinished ㄘ
+    assert!(controller.should_eat_key_down(0x61, '1', false, false));
+    controller.on_key_down(0x61, '1', false, false, false, &sink);
+    controller.on_key_down(VK_RETURN, '\r', false, false, false, &sink);
+
+    assert_eq!(sink.commits.borrow().as_slice(), ["測1"]);
+}
+
+#[test]
+fn temporary_english_replaces_unfinished_bopomofo_after_chinese() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+
+    type_chars(&mut controller, "hk4h", &sink); // 測 + unfinished ㄘ
+    type_temporary_english(&mut controller, "A", &sink);
+    controller.on_key_down(VK_RETURN, '\r', false, false, false, &sink);
+
+    assert_eq!(sink.commits.borrow().as_slice(), ["測A"]);
+}
+
+#[test]
+fn mixed_backspace_clears_unfinished_bopomofo_before_english() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+
+    type_chars(&mut controller, "hk4", &sink); // 測
+    type_temporary_english(&mut controller, "A", &sink);
+    type_chars(&mut controller, "h", &sink); // unfinished ㄘ after A
+    controller.on_key_down(VK_BACK, '\0', false, false, false, &sink);
+
+    assert_eq!(
+        sink.preedits.borrow().last().map(String::as_str),
+        Some("測A")
+    );
+}
+
+#[test]
+fn switching_to_english_clears_partial_bopomofo() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+
+    type_chars(&mut controller, "hk", &sink); // ㄘㄜ, not committed yet
+    assert!(controller.has_content());
+    controller.on_key_down(VK_SHIFT, '\0', true, false, false, &sink);
+    controller.on_key_up(VK_SHIFT, &sink);
+
+    assert!(!controller.has_content());
+    assert_eq!(sink.end_preedit_count.get(), 1);
+}
+
+#[test]
+fn caps_english_run_stays_between_surrounding_chinese() {
+    let prefs = Preferences {
+        caps_lock_behavior: CapsLockBehavior::ToggleChineseEnglish,
+        ..Preferences::default()
+    };
+    let Some(mut controller) = activated_controller_with_preferences(&prefs) else {
+        return;
+    };
+    let sink = RecordingSink::default();
+
+    type_chars(&mut controller, "hk4", &sink); // 測
+    controller.on_key_down(0x42, 'B', false, false, true, &sink);
+    type_chars(&mut controller, "g4", &sink); // Caps off, then 試
+    controller.on_key_down(VK_RETURN, '\r', false, false, false, &sink);
+
+    assert_eq!(sink.commits.borrow().as_slice(), ["測B試"]);
+}
+
+#[test]
+fn shift_punctuation_remains_chinese_and_does_not_toggle_mode() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+
+    controller.on_key_down(VK_SHIFT, '\0', true, false, false, &sink);
+    controller.on_key_down(0xBC, '<', true, false, false, &sink);
+    controller.on_key_up(VK_SHIFT, &sink);
+    controller.on_key_down(VK_RETURN, '\r', false, false, false, &sink);
+
+    assert_eq!(sink.commits.borrow().as_slice(), ["，"]);
+    assert!(controller.should_eat_key_down(0x48, 'h', false, false));
+}
+
+#[test]
+fn shift_modified_passthrough_key_does_not_toggle_english_mode() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+
+    controller.on_key_down(VK_SHIFT, '\0', true, false, false, &sink);
+    assert!(controller.should_eat_key_down(VK_RETURN, '\r', false, false));
+    assert!(!controller.on_key_down(VK_RETURN, '\r', true, false, false, &sink));
+    controller.on_key_up(VK_SHIFT, &sink);
+
+    // Chinese mode still wants a normal letter; an accidental Shift toggle
+    // would make this native English and return false.
+    assert!(controller.should_eat_key_down(0x48, 'h', false, false));
+}
+
 fn type_chars(controller: &mut Controller, input: &str, sink: &RecordingSink) {
     for ch in input.chars() {
         let (vkey, shift) = char_to_vkey(ch);
         controller.on_key_down(vkey, ch, shift, false, false, sink);
     }
+}
+
+fn type_temporary_english(controller: &mut Controller, input: &str, sink: &RecordingSink) {
+    controller.on_key_down(VK_SHIFT, '\0', true, false, false, sink);
+    type_chars(controller, input, sink);
+    controller.on_key_up(VK_SHIFT, sink);
+}
+
+fn type_syllable_n(
+    controller: &mut Controller,
+    syllable: &str,
+    count: usize,
+    sink: &RecordingSink,
+) {
+    for _ in 0..count {
+        type_chars(controller, syllable, sink);
+    }
+}
+
+fn activated_controller() -> Option<Controller> {
+    activated_controller_with_preferences(&Preferences::default())
+}
+
+fn activated_controller_with_preferences(prefs: &Preferences) -> Option<Controller> {
+    let dict_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("data-provider")
+        .join("output");
+    if !dict_path.join("tsi.dat").exists() || !dict_path.join("word.dat").exists() {
+        eprintln!(
+            "skipping: generated dictionaries are missing at {}",
+            dict_path.display()
+        );
+        return None;
+    }
+    let mut controller = Controller::new();
+    controller.activate_with_preferences(Some(dict_path.to_string_lossy().into_owned()), prefs);
+    Some(controller)
 }
 
 fn char_to_vkey(ch: char) -> (u32, bool) {

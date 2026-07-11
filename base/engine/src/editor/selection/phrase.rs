@@ -7,6 +7,41 @@ use crate::{
     zhuyin::Syllable,
 };
 
+fn finalize_candidates(
+    mut candidates: Vec<Phrase>,
+    sort_by_frequency: bool,
+    prefer_longer: bool,
+) -> Vec<String> {
+    if sort_by_frequency {
+        if prefer_longer {
+            // A selection range can contain full phrases, shorter phrases,
+            // and single characters. Keep the structurally best match first;
+            // compare frequency only among candidates that replace the same
+            // number of characters.
+            candidates.sort_by(|a, b| {
+                b.as_str()
+                    .chars()
+                    .count()
+                    .cmp(&a.as_str().chars().count())
+                    .then_with(|| b.freq().cmp(&a.freq()))
+            });
+        } else {
+            candidates.sort_by_key(|ph| Reverse(ph.freq()));
+        }
+    }
+
+    // Alternative-syllable expansion can produce the same visible text more
+    // than once. Preserve the best-ranked occurrence and avoid wasting a
+    // selection key on a duplicate.
+    let mut unique = Vec::with_capacity(candidates.len());
+    for phrase in candidates {
+        if !unique.iter().any(|text: &String| text == phrase.as_str()) {
+            unique.push(phrase.into());
+        }
+    }
+    unique
+}
+
 #[derive(Debug)]
 pub(crate) struct PhraseSelector {
     begin: usize,
@@ -277,10 +312,11 @@ impl PhraseSelector {
                 candidates.extend(dict.lookup(&[syl], self.lookup_strategy).into_iter())
             }
         }
-        if editor.options.sort_candidates_by_frequency {
-            candidates.sort_by_key(|ph| Reverse(ph.freq()));
-        }
-        candidates.into_iter().map(|ph| ph.into()).collect()
+        finalize_candidates(
+            candidates,
+            editor.options.sort_candidates_by_frequency,
+            editor.options.prefer_longer_candidates,
+        )
     }
 
     /// Build interval for the selected phrase.
@@ -311,13 +347,32 @@ impl PhraseSelector {
 
 #[cfg(test)]
 mod tests {
-    use super::PhraseSelector;
+    use super::{PhraseSelector, finalize_candidates};
     use crate::{
         conversion::{Composition, Symbol},
-        dictionary::{LookupStrategy, TrieBuf},
+        dictionary::{LookupStrategy, Phrase, TrieBuf},
         syl,
         zhuyin::Bopomofo::*,
     };
+
+    #[test]
+    fn smart_candidate_order_prefers_length_then_frequency_and_deduplicates() {
+        let candidates = vec![
+            Phrase::new("字", 900),
+            Phrase::new("詞組", 100),
+            Phrase::new("另一", 200),
+            Phrase::new("詞組", 300),
+        ];
+
+        assert_eq!(
+            finalize_candidates(candidates.clone(), true, true),
+            ["詞組", "另一", "字"]
+        );
+        assert_eq!(
+            finalize_candidates(candidates, true, false),
+            ["字", "詞組", "另一"]
+        );
+    }
 
     #[test]
     fn init_when_cursor_end_of_buffer_syllable() {

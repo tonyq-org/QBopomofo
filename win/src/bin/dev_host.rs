@@ -127,7 +127,13 @@ impl<'a> GuiSink<'a> {
 }
 
 impl<'a> InputSink for GuiSink<'a> {
-    fn update_preedit(&self, text: &str) -> Option<(i32, i32)> {
+    fn update_preedit(
+        &self,
+        text: &str,
+        _cursor_utf16: usize,
+        _needs_caret_position: bool,
+        _update_selection: bool,
+    ) -> Option<(i32, i32)> {
         self.replace_preedit_with(text);
         // Also reflect in the title for visibility while testing.
         let title = if text.is_empty() {
@@ -142,17 +148,19 @@ impl<'a> InputSink for GuiSink<'a> {
         caret_screen_pos(self.edit)
     }
 
-    fn commit_text(&self, text: &str) {
+    fn commit_text(&self, text: &str) -> bool {
         // Replace preedit (if any) with the committed text and clear tracker.
         self.replace_preedit_with(text);
         *self.preedit.borrow_mut() = None;
+        true
     }
 
-    fn end_preedit(&self) {
+    fn end_preedit(&self) -> bool {
         *self.preedit.borrow_mut() = None;
         unsafe {
             let _ = SetWindowTextW(self.parent, w!("QBopomofo dev_host"));
         }
+        true
     }
 
     fn show_candidates(

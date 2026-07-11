@@ -17,15 +17,17 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 
 $dest = Join-Path $env:ProgramFiles 'QBopomofo'
 $dll = Join-Path $dest 'qbopomofo_tip.dll'
+$shortcut = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Q注音設定.lnk'
 
 if (Test-Path $dll) {
     Write-Host '[*] 解除註冊 TSF 輸入法...'
-    & regsvr32 /u /s $dll
+    $regsvr = Join-Path $env:WINDIR 'System32\regsvr32.exe'
+    Start-Process -FilePath $regsvr -ArgumentList "/u /s `"$dll`"" -Wait | Out-Null
 }
 
 Write-Host '[*] 重啟 ctfmon 釋放 DLL...'
 Stop-Process -Name ctfmon -Force -Confirm:$false -ErrorAction SilentlyContinue
-Start-Process "$env:WINDIR\System32\ctfmon.exe"
+Start-Process "$env:WINDIR\System32\ctfmon.exe" -WindowStyle Hidden
 Start-Sleep -Seconds 1
 
 if (Test-Path $dest) {
@@ -36,6 +38,7 @@ if (Test-Path $dest) {
         Write-Host '[!] 部分檔案仍被使用中，重開機後可手動刪除該資料夾。'
     }
 }
+Remove-Item -LiteralPath $shortcut -Force -ErrorAction SilentlyContinue
 
 # Clean up per-user settings
 [System.Environment]::SetEnvironmentVariable('QBOPOMOFO_DEBUG', $null, 'User')

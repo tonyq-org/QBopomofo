@@ -257,6 +257,7 @@ jobs:
           $stage = 'pkg-stage/QBopomofo'
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item win/target/release/qbopomofo_tip.dll $stage
+          Copy-Item win/target/release/qbopomofo_settings.exe $stage
           Copy-Item data-provider/output/*.dat $stage
           Copy-Item win/package/* $stage
           $zip = "QBopomofo-$version-win-x64.zip"

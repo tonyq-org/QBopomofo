@@ -1,20 +1,25 @@
 //! Debug logging for QBopomofo Windows TSF.
 //!
-//! Enabled by setting the environment variable `QBOPOMOFO_DEBUG=1`.
+//! Enabled by the Windows preference or environment variable
+//! `QBOPOMOFO_DEBUG=1`.
 //! When enabled, writes to `%TEMP%\qbopomofo.log`.
 //! When disabled, all logging is a no-op with zero overhead.
 
+use std::fmt::Arguments;
 use std::io::Write;
 use std::sync::OnceLock;
 
 static DEBUG_ENABLED: OnceLock<bool> = OnceLock::new();
 
-fn is_debug() -> bool {
-    *DEBUG_ENABLED.get_or_init(|| std::env::var("QBOPOMOFO_DEBUG").is_ok())
+pub fn is_debug() -> bool {
+    *DEBUG_ENABLED.get_or_init(|| {
+        std::env::var("QBOPOMOFO_DEBUG").is_ok()
+            || crate::preferences::Preferences::load().debug_logging
+    })
 }
 
-/// Write a debug log line. No-op if QBOPOMOFO_DEBUG is not set.
-pub fn dbg_log(msg: &str) {
+/// Write a debug log line. No-op when diagnostic logging is disabled.
+pub fn dbg_log(args: Arguments<'_>) {
     if !is_debug() {
         return;
     }
@@ -25,7 +30,9 @@ pub fn dbg_log(msg: &str) {
         .append(true)
         .open(&path)
     {
-        let _ = writeln!(f, "[{}] {}", timestamp(), msg);
+        let _ = write!(f, "[{}] ", timestamp());
+        let _ = f.write_fmt(args);
+        let _ = writeln!(f);
     }
 }
 
@@ -33,7 +40,9 @@ pub fn dbg_log(msg: &str) {
 #[macro_export]
 macro_rules! qb_dbg {
     ($($arg:tt)*) => {
-        $crate::debug_log::dbg_log(&format!($($arg)*))
+        if $crate::debug_log::is_debug() {
+            $crate::debug_log::dbg_log(format_args!($($arg)*))
+        }
     };
 }
 

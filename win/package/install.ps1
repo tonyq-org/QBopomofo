@@ -4,7 +4,7 @@
 #   powershell -ExecutionPolicy Bypass -File install.ps1
 #
 # 會自動要求系統管理員權限。安裝內容：
-#   1. 複製 qbopomofo_tip.dll 與字典檔到 %ProgramFiles%\QBopomofo
+#   1. 複製 qbopomofo_tip.dll、設定程式與字典檔到 %ProgramFiles%\QBopomofo
 #   2. regsvr32 註冊 TSF 輸入法
 #   3. 重啟 ctfmon 載入新版本
 #
@@ -25,7 +25,14 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 }
 
 $dest = Join-Path $env:ProgramFiles 'QBopomofo'
-$files = @('qbopomofo_tip.dll', 'word.dat', 'tsi.dat', 'symbols.dat', 'swkb.dat')
+$files = @(
+    'qbopomofo_tip.dll',
+    'qbopomofo_settings.exe',
+    'word.dat',
+    'tsi.dat',
+    'symbols.dat',
+    'swkb.dat'
+)
 
 foreach ($f in $files) {
     if (-not (Test-Path (Join-Path $src $f))) {
@@ -54,17 +61,29 @@ Get-ChildItem (Join-Path $dest '*.old-*') -ErrorAction SilentlyContinue | ForEac
 
 Write-Host '[*] 註冊 TSF 輸入法...'
 $dll = Join-Path $dest 'qbopomofo_tip.dll'
-& regsvr32 /s $dll
-if ($LASTEXITCODE -ne 0) {
-    throw "regsvr32 註冊失敗 (exit $LASTEXITCODE)"
+$regsvr = Join-Path $env:WINDIR 'System32\regsvr32.exe'
+$registration = Start-Process -FilePath $regsvr -ArgumentList "/s `"$dll`"" -Wait -PassThru
+if ($registration.ExitCode -ne 0) {
+    throw "regsvr32 註冊失敗 (exit $($registration.ExitCode))"
 }
+
+Write-Host '[*] 建立「Q注音設定」開始功能表捷徑...'
+$settings = Join-Path $dest 'qbopomofo_settings.exe'
+$shortcutPath = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Q注音設定.lnk'
+$shell = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut($shortcutPath)
+$shortcut.TargetPath = $settings
+$shortcut.WorkingDirectory = $dest
+$shortcut.Description = 'Q注音輸入法設定'
+$shortcut.Save()
 
 Write-Host '[*] 重啟 ctfmon...'
 Stop-Process -Name ctfmon -Force -Confirm:$false -ErrorAction SilentlyContinue
-Start-Process "$env:WINDIR\System32\ctfmon.exe"
+Start-Process "$env:WINDIR\System32\ctfmon.exe" -WindowStyle Hidden
 
 Write-Host ''
 Write-Host '[*] 安裝完成！'
+Write-Host '    可從開始功能表搜尋「Q注音設定」。'
 Write-Host '    若是第一次安裝，請到：'
 Write-Host '    設定 → 時間與語言 → 語言與地區 → 中文(台灣) → 語言選項'
 Write-Host '    → 新增鍵盤 → Q注音輸入法'

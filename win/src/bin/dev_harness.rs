@@ -8,6 +8,7 @@
 //!
 //! ```
 //! KEY <hex> [flags]        # raw Windows VK; flags: shift,ctrl,caps
+//! KEYUP <hex>              # raw Windows key-up (needed for Shift toggle)
 //! TYPE <string>            # send each printable char as a key
 //! #  ... anything          # comment, ignored
 //!                          # blank line, ignored
@@ -52,7 +53,13 @@ impl StdoutSink {
 }
 
 impl InputSink for StdoutSink {
-    fn update_preedit(&self, text: &str) -> Option<(i32, i32)> {
+    fn update_preedit(
+        &self,
+        text: &str,
+        _cursor_utf16: usize,
+        _needs_caret_position: bool,
+        _update_selection: bool,
+    ) -> Option<(i32, i32)> {
         if text.is_empty() {
             self.println("PREEDIT: \"\"");
         } else {
@@ -61,12 +68,14 @@ impl InputSink for StdoutSink {
         None
     }
 
-    fn commit_text(&self, text: &str) {
+    fn commit_text(&self, text: &str) -> bool {
         self.println(&format!("COMMIT: {:?}", text));
+        true
     }
 
-    fn end_preedit(&self) {
+    fn end_preedit(&self) -> bool {
         self.println("END_PREEDIT");
+        true
     }
 
     fn show_candidates(
@@ -125,6 +134,19 @@ fn main() {
         if let Some(rest) = line.strip_prefix("TYPE ").or_else(|| line.strip_prefix("TYPE\t")) {
             for ch in rest.chars() {
                 send_char(&mut controller, ch, &sink);
+            }
+            continue;
+        }
+
+        if let Some(rest) = line
+            .strip_prefix("KEYUP ")
+            .or_else(|| line.strip_prefix("KEYUP\t"))
+        {
+            match parse_u32(rest.trim()) {
+                Some(vkey) => {
+                    controller.on_key_up(vkey, &sink);
+                }
+                None => eprintln!("[error] bad KEYUP vkey {:?}", rest.trim()),
             }
             continue;
         }

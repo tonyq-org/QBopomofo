@@ -12,11 +12,11 @@
 use chewing::composing_session::ComposingSession;
 use chewing::dictionary::DEFAULT_DICT_NAMES;
 use chewing::editor::{BasicEditor, Editor, EditorKeyBehavior};
-use chewing::input::{keycode, KeyboardEvent};
+use chewing::input::{KeyboardEvent, keycode};
 use chewing::typing_mode::{CapsLockBehavior, ModePreferences, ShiftBehavior};
 
-use crate::key_event::vkey_to_keyboard_event;
-use crate::preferences::Preferences;
+use crate::key_event::{numpad_character, vkey_to_keyboard_event};
+use crate::preferences::{CandidateOrdering, Preferences};
 
 // Virtual key codes — duplicated from text_service so controller has no
 // platform-specific dependency on the windows crate.
@@ -31,6 +31,12 @@ pub const VK_LEFT: u32 = 0x25;
 pub const VK_UP: u32 = 0x26;
 pub const VK_RIGHT: u32 = 0x27;
 pub const VK_DOWN: u32 = 0x28;
+pub const VK_HOME: u32 = 0x24;
+pub const VK_END: u32 = 0x23;
+pub const VK_PRIOR: u32 = 0x21;
+pub const VK_NEXT: u32 = 0x22;
+
+const MIXED_AUTO_COMMIT_THRESHOLD: usize = 20;
 
 /// Events the controller emits — the platform adapter renders them.
 ///
@@ -42,13 +48,21 @@ pub trait InputSink {
     /// The implementation should decide whether to start a fresh composition
     /// or replace the current one. Returns the caret screen position if
     /// known, so the controller can remember where to pop candidates.
-    fn update_preedit(&self, text: &str) -> Option<(i32, i32)>;
+    fn update_preedit(
+        &self,
+        text: &str,
+        cursor_utf16: usize,
+        needs_caret_position: bool,
+        update_selection: bool,
+    ) -> Option<(i32, i32)>;
 
     /// Commit the given text to the underlying document and end any preedit.
-    fn commit_text(&self, text: &str);
+    /// Returns whether the platform actually applied the commit.  TSF can
+    /// accept RequestEditSession itself while rejecting the inner session.
+    fn commit_text(&self, text: &str) -> bool;
 
     /// End the current preedit without committing anything.
-    fn end_preedit(&self);
+    fn end_preedit(&self) -> bool;
 
     /// Show the candidate window.
     fn show_candidates(
@@ -82,6 +96,16 @@ pub struct Controller {
     candidate_highlight: usize,
     last_caret_pos: Option<(i32, i32)>,
 
+    // Character cursor in the fully-rendered mixed display. None means end.
+    mixed_display_cursor: Option<usize>,
+
+    // A synchronous TSF edit session can be rejected even though the outer
+    // COM call succeeds. Keep a commit until the platform confirms it was
+    // applied so the next key cannot silently lose or duplicate text.
+    pending_commit: Option<String>,
+    force_selection_update: bool,
+    caps_english_active: bool,
+
     activated: bool,
 }
 
@@ -102,6 +126,10 @@ impl Controller {
             space_cycle_saved_cursor: 0,
             candidate_highlight: 0,
             last_caret_pos: None,
+            mixed_display_cursor: None,
+            pending_commit: None,
+            force_selection_update: false,
+            caps_english_active: false,
             activated: false,
         }
     }
@@ -110,15 +138,29 @@ impl Controller {
     /// `on_key_down`. `dict_path` is where dictionaries live (None = default).
     pub fn activate(&mut self, dict_path: Option<String>) {
         let user_prefs = Preferences::load();
-        self.apply_user_prefs(&user_prefs);
+        self.activate_with_preferences(dict_path, &user_prefs);
+    }
 
-        let mut ed = Editor::chewing(dict_path, None, &DEFAULT_DICT_NAMES);
+    /// Initialize with an explicit preference snapshot. Development hosts and
+    /// regression tests use this to avoid depending on the current registry.
+    pub fn activate_with_preferences(
+        &mut self,
+        dict_path: Option<String>,
+        user_prefs: &Preferences,
+    ) {
+        self.apply_user_prefs(user_prefs);
+
+        let mut ed = Editor::chewing(dict_path, None, DEFAULT_DICT_NAMES);
         ed.set_editor_options(|opts| {
             opts.candidates_per_page = user_prefs.candidates_per_page as usize;
             opts.space_is_select_key = true;
             opts.esc_clear_all_buffer = true;
             opts.auto_commit_threshold = 20;
             opts.auto_shift_cursor = true;
+            opts.sort_candidates_by_frequency =
+                user_prefs.candidate_ordering != CandidateOrdering::Dictionary;
+            opts.prefer_longer_candidates =
+                user_prefs.candidate_ordering == CandidateOrdering::Smart;
         });
         self.editor = Some(ed);
         self.activated = true;
@@ -130,6 +172,10 @@ impl Controller {
         self.reset_space_cycle();
         self.candidate_highlight = 0;
         self.last_caret_pos = None;
+        self.mixed_display_cursor = None;
+        self.pending_commit = None;
+        self.force_selection_update = false;
+        self.caps_english_active = false;
         self.activated = false;
     }
 
@@ -145,12 +191,14 @@ impl Controller {
     /// (e.g. committed Chinese chars that haven't been flushed) or the mixed
     /// composing session has data. Used by OnTestKeyDown to decide eat-or-pass.
     pub fn has_content(&self) -> bool {
-        let engine_content = self.editor.as_ref().map_or(false, |e| !e.is_empty());
-        engine_content || self.session.has_mixed_content()
+        let engine_content = self.editor.as_ref().is_some_and(|editor| {
+            !editor.is_empty() || !editor.syllable_buffer_display().is_empty()
+        });
+        engine_content || self.session.has_mixed_content() || self.pending_commit.is_some()
     }
 
     pub fn is_selecting(&self) -> bool {
-        self.editor.as_ref().map_or(false, |e| e.is_selecting())
+        self.editor.as_ref().is_some_and(|e| e.is_selecting())
     }
 
     pub fn is_shift_held(&self) -> bool {
@@ -169,19 +217,51 @@ impl Controller {
     // Display string — pure read
     // -----------------------------------------------------------------------
 
-    fn build_display(&self) -> String {
-        let Some(editor) = self.editor.as_ref() else { return String::new(); };
+    fn build_display(&self, chinese: &str, syllable: &str) -> (String, usize) {
+        let Some(editor) = self.editor.as_ref() else {
+            return (String::new(), 0);
+        };
 
         if self.session.has_mixed_content() {
-            self.session
-                .build_display(&editor.display(), &editor.syllable_buffer_display())
-        } else {
-            let display = editor.display();
-            let syllable = editor.syllable_buffer_display();
-            if syllable.is_empty() {
-                display
+            let mut display = self.session.build_display(chinese, "");
+            let engine_display_cursor = self
+                .session
+                .chewing_to_display_cursor(editor.cursor(), chinese)
+                .min(display.chars().count());
+            if !syllable.is_empty() {
+                let byte_cursor = display
+                    .char_indices()
+                    .nth(engine_display_cursor)
+                    .map_or(display.len(), |(idx, _)| idx);
+                display.insert_str(byte_cursor, syllable);
+            }
+            let len = display.chars().count();
+            let engine_cursor = engine_display_cursor + syllable.chars().count();
+            let default_cursor = if self.session.english_buffer().is_empty() {
+                engine_cursor
             } else {
-                format!("{}{}", display, syllable)
+                len
+            };
+            let cursor = self
+                .mixed_display_cursor
+                .unwrap_or(default_cursor)
+                .min(len);
+            (display, cursor)
+        } else {
+            let mut display = chinese.to_string();
+            if syllable.is_empty() {
+                let cursor = editor.cursor().min(display.chars().count());
+                (display, cursor)
+            } else {
+                // The engine cursor can be inside the Chinese buffer. Insert
+                // the visible bopomofo there instead of always appending it.
+                let char_cursor = editor.cursor().min(display.chars().count());
+                let byte_cursor = display
+                    .char_indices()
+                    .nth(char_cursor)
+                    .map_or(display.len(), |(idx, _)| idx);
+                display.insert_str(byte_cursor, syllable);
+                (display, char_cursor + syllable.chars().count())
             }
         }
     }
@@ -192,9 +272,17 @@ impl Controller {
 
     /// OnTestKeyDown decision — does the controller want to handle this key?
     /// Returns true if the key should be eaten.
-    pub fn should_eat_key_down(&self, vkey: u32, ch: char, ctrl: bool) -> bool {
+    pub fn should_eat_key_down(&self, vkey: u32, ch: char, ctrl: bool, caps_lock: bool) -> bool {
         if !self.activated {
             return false;
+        }
+        if self.pending_commit.is_some()
+            && !matches!(vkey, VK_SHIFT | VK_CONTROL | VK_MENU)
+        {
+            // Route the next real key through OnKeyDown so a rejected
+            // synchronous commit is retried before the application observes
+            // any newer input, even if chewing does not map that key.
+            return true;
         }
         if ctrl || vkey == VK_CONTROL || vkey == VK_MENU {
             return false;
@@ -205,10 +293,29 @@ impl Controller {
         }
 
         let has_content = self.has_content();
+        if self.is_selecting() && matches!(vkey, VK_HOME | VK_END | VK_PRIOR | VK_NEXT) {
+            return true;
+        }
+        if numpad_character(vkey).is_some() {
+            return has_content;
+        }
         if has_content {
             // Engine may handle this key — eat if we know a mapping
             vkey_to_keyboard_event(vkey, ch, false, ctrl, false).is_some()
         } else {
+            let caps_english = caps_lock
+                && self.prefs.caps_lock_behavior == CapsLockBehavior::ToggleChineseEnglish;
+            // With no composition, ordinary English should be handled natively
+            // by the application. Temporary Shift-English is still tested so
+            // OnKeyDown can mark the Shift gesture as used before passing it on.
+            if (self.session.is_english_mode() || caps_english) && !self.session.is_shift_held() {
+                return false;
+            }
+            if self.session.is_shift_held()
+                && vkey_to_keyboard_event(vkey, ch, false, ctrl, false).is_some()
+            {
+                return true;
+            }
             // Not composing: only eat keys that start input
             ch.is_ascii_graphic() || vkey == VK_SPACE
         }
@@ -231,16 +338,17 @@ impl Controller {
         caps_lock: bool,
         sink: &dyn InputSink,
     ) -> bool {
+        if !self.retry_pending_commit(sink) {
+            return true;
+        }
+
         if ctrl || vkey == VK_CONTROL || vkey == VK_MENU {
             return false;
         }
 
         // Shift key-down: notify session
         if vkey == VK_SHIFT {
-            let chinese_buf = self
-                .editor
-                .as_ref()
-                .map_or(String::new(), |e| e.display());
+            let chinese_buf = self.editor.as_ref().map_or(String::new(), |e| e.display());
             self.session.handle_shift(true, &self.prefs, &chinese_buf);
             return true;
         }
@@ -249,8 +357,37 @@ impl Controller {
         let caps_english =
             caps_lock && self.prefs.caps_lock_behavior == CapsLockBehavior::ToggleChineseEnglish;
 
+        if self.caps_english_active && !caps_english && !self.session.is_english_mode() {
+            let chinese_buf = self
+                .editor
+                .as_ref()
+                .map_or(String::new(), |editor| editor.display());
+            self.session.finish_english_run(&chinese_buf);
+        }
+        self.caps_english_active = caps_english;
+
         let is_english = self.session.is_english_mode();
         let is_shift_held = self.session.is_shift_held();
+
+        if !self.is_selecting() && let Some(ascii) = numpad_character(vkey) {
+            if !self.has_content() {
+                return false;
+            }
+            return self.insert_inline_ascii(ascii, sink);
+        }
+
+        // Mixed content owns a display-level cursor. Candidate navigation has
+        // priority, but outside candidate mode Left/Right/Home/End and
+        // Backspace must operate on the interleaved display, not just chewing's
+        // flattened Chinese buffer.
+        if self.session.has_mixed_content() && !self.is_selecting() {
+            if matches!(vkey, VK_LEFT | VK_RIGHT | VK_HOME | VK_END) {
+                return self.handle_mixed_navigation(vkey, sink);
+            }
+            if vkey == VK_BACK {
+                return self.handle_mixed_backspace(sink);
+            }
+        }
 
         if is_english || caps_english {
             return self.handle_english_key(vkey, ch, shift, sink);
@@ -263,18 +400,20 @@ impl Controller {
         }
 
         // Candidate selection mode — intercept before engine
-        if self.is_selecting() {
-            if let Some(handled) = self.handle_candidate_key(vkey, ch, sink) {
-                return handled;
-            }
-            // Fall through to engine
+        if self.is_selecting()
+            && let Some(handled) = self.handle_candidate_key(vkey, ch, sink)
+        {
+            return handled;
         }
+        // Unhandled candidate keys fall through to the engine.
 
         // Space cycle — intercept Space before engine
-        if !self.is_selecting() && vkey == VK_SPACE && !shift {
-            if let Some(handled) = self.handle_space_cycle(sink) {
-                return handled;
-            }
+        if !self.is_selecting()
+            && vkey == VK_SPACE
+            && !shift
+            && let Some(handled) = self.handle_space_cycle(sink)
+        {
+            return handled;
         }
 
         if vkey != VK_SPACE {
@@ -284,6 +423,18 @@ impl Controller {
         let Some(evt) = vkey_to_keyboard_event(vkey, ch, shift, ctrl, caps_lock) else {
             return false;
         };
+
+        if let Some(display_cursor) = self.mixed_display_cursor {
+            let (chinese, bopomofo) = self.current_buffers();
+            let chewing_cursor =
+                self.session
+                    .display_to_chewing_cursor(display_cursor, &chinese, &bopomofo);
+            if chewing_cursor >= 0 {
+                self.sync_editor_cursor(chewing_cursor as usize);
+            }
+            // The engine owns cursor motion while composing a new syllable.
+            self.mixed_display_cursor = None;
+        }
 
         if shift && !ch.is_ascii_alphabetic() {
             self.session.mark_shift_used();
@@ -315,15 +466,18 @@ impl Controller {
         if vkey != VK_SHIFT || !self.activated {
             return false;
         }
-        let chinese_buf = self
-            .editor
-            .as_ref()
-            .map_or(String::new(), |e| e.display());
+        let chinese_buf = self.editor.as_ref().map_or(String::new(), |e| e.display());
+        self.session.resync_chinese(&chinese_buf);
         let changed = self.session.handle_shift(false, &self.prefs, &chinese_buf);
         if changed {
+            if self.session.is_english_mode() && let Some(editor) = self.editor.as_mut() {
+                editor.clear_syllable_editor();
+            }
             let has_content = self.session.has_mixed_content() || !chinese_buf.is_empty();
             if has_content {
                 self.send_update(sink);
+            } else {
+                let _ = sink.end_preedit();
             }
         }
         true
@@ -335,6 +489,9 @@ impl Controller {
             ed.clear();
         }
         self.reset_space_cycle();
+        self.mixed_display_cursor = None;
+        self.pending_commit = None;
+        self.force_selection_update = false;
         sink.hide_candidates();
     }
 
@@ -343,8 +500,44 @@ impl Controller {
     // -----------------------------------------------------------------------
 
     fn send_update(&mut self, sink: &dyn InputSink) {
-        let text = self.build_display();
-        let caret = sink.update_preedit(&text);
+        let (chinese, bopomofo) = self.current_buffers();
+        if self.session.has_mixed_content() {
+            self.session.resync_chinese(&chinese);
+        }
+
+        let (text, cursor_chars) = self.build_display(&chinese, &bopomofo);
+        let display_len = text.chars().count();
+
+        // English characters do not count toward chewing's internal auto-
+        // commit threshold. Enforce the user-visible mixed limit here and
+        // commit the entire interleaved composition atomically.
+        if self.session.has_mixed_content()
+            && display_len > MIXED_AUTO_COMMIT_THRESHOLD
+            && bopomofo.is_empty()
+        {
+            let full = self.session.commit_all(&chinese);
+            if let Some(ed) = self.editor.as_mut() {
+                ed.clear();
+            }
+            self.mixed_display_cursor = None;
+            self.force_selection_update = false;
+            if !full.is_empty() {
+                self.emit_commit(&full, sink);
+            }
+            sink.hide_candidates();
+            return;
+        }
+
+        let cursor_utf16 = text
+            .chars()
+            .take(cursor_chars.min(display_len))
+            .map(char::len_utf16)
+            .sum();
+        let needs_caret_position = self.is_selecting();
+        let update_selection = self.force_selection_update || cursor_chars < display_len;
+        self.force_selection_update = false;
+        let caret =
+            sink.update_preedit(&text, cursor_utf16, needs_caret_position, update_selection);
         if let Some(p) = caret {
             self.last_caret_pos = Some(p);
         }
@@ -380,6 +573,14 @@ impl Controller {
             self.candidate_highlight = 0;
         }
 
+        crate::qb_dbg!(
+            "candidate_list page={}/{} highlight={} items={:?}",
+            page_no + 1,
+            total_page,
+            self.candidate_highlight,
+            cands
+        );
+
         sink.show_candidates(
             &cands,
             &self.selection_keys,
@@ -393,10 +594,7 @@ impl Controller {
         let has_content = self.has_content();
 
         if vkey == VK_RETURN && has_content {
-            let chinese_buf = self
-                .editor
-                .as_ref()
-                .map_or(String::new(), |e| e.display());
+            let chinese_buf = self.editor.as_ref().map_or(String::new(), |e| e.display());
             let commit_str = if self.session.has_mixed_content() {
                 self.session.commit_all(&chinese_buf)
             } else {
@@ -405,10 +603,11 @@ impl Controller {
             if let Some(ed) = self.editor.as_mut() {
                 ed.clear();
             }
+            self.mixed_display_cursor = None;
             if !commit_str.is_empty() {
-                sink.commit_text(&commit_str);
+                self.emit_commit(&commit_str, sink);
             } else {
-                sink.end_preedit();
+                let _ = sink.end_preedit();
             }
             sink.hide_candidates();
             return true;
@@ -419,13 +618,14 @@ impl Controller {
             if let Some(ed) = self.editor.as_mut() {
                 ed.clear();
             }
-            sink.end_preedit();
+            self.mixed_display_cursor = None;
+            let _ = sink.end_preedit();
             sink.hide_candidates();
             return true;
         }
 
         if vkey == VK_BACK && !has_content {
-            sink.end_preedit();
+            let _ = sink.end_preedit();
             return false;
         }
 
@@ -433,28 +633,39 @@ impl Controller {
     }
 
     fn handle_commit_flow(&mut self, sink: &dyn InputSink) {
-        let commit_text = match self.editor.as_mut() {
+        let (commit_text, remaining_chinese) = match self.editor.as_mut() {
             Some(ed) => {
                 let text = ed.display_commit().to_string();
                 ed.ack();
-                text
+                let remaining = ed.display();
+                (text, remaining)
             }
             None => return,
         };
 
         if self.session.has_mixed_content() {
-            let full = self.session.commit_all(&commit_text);
+            // Auto-commit returns only the removed prefix while leaving the
+            // rest in the editor. Mixed composition is user-visible as one
+            // unit, so reconstruct and flush the whole Chinese source once.
+            let mut complete_chinese = commit_text;
+            complete_chinese.push_str(&remaining_chinese);
+            self.session.resync_chinese(&complete_chinese);
+            let full = self.session.commit_all(&complete_chinese);
+            if let Some(ed) = self.editor.as_mut() {
+                ed.clear();
+            }
+            self.mixed_display_cursor = None;
             if !full.is_empty() {
-                sink.commit_text(&full);
+                self.emit_commit(&full, sink);
             }
             sink.hide_candidates();
             return;
         }
 
-        let has_remaining = self.editor.as_ref().map_or(false, |e| !e.is_empty());
+        let has_remaining = self.editor.as_ref().is_some_and(|e| !e.is_empty());
 
-        if !commit_text.is_empty() {
-            sink.commit_text(&commit_text);
+        if !commit_text.is_empty() && !self.emit_commit(&commit_text, sink) {
+            return;
         }
         if has_remaining {
             self.send_update(sink);
@@ -473,39 +684,65 @@ impl Controller {
         // Printable ASCII or space
         if ch.is_ascii_graphic() || vkey == VK_SPACE {
             let actual_ch = if vkey == VK_SPACE { ' ' } else { ch };
-            let chinese_buf = self
-                .editor
-                .as_ref()
-                .map_or(String::new(), |e| e.display());
-            let direct_commit = self.session.type_english(actual_ch, &chinese_buf);
+            let (chinese_buf, had_bopomofo) = self.editor.as_ref().map_or_else(
+                || (String::new(), false),
+                |editor| {
+                    (
+                        editor.display(),
+                        !editor.syllable_buffer_display().is_empty(),
+                    )
+                },
+            );
+            if had_bopomofo && let Some(editor) = self.editor.as_mut() {
+                editor.clear_syllable_editor();
+            }
+            let direct_commit = if let Some(cursor) = self.mixed_display_cursor {
+                let bopomofo = self
+                    .editor
+                    .as_ref()
+                    .map_or(String::new(), |e| e.syllable_buffer_display());
+                if self
+                    .session
+                    .insert_english_at(actual_ch, cursor, &chinese_buf, &bopomofo)
+                {
+                    self.mixed_display_cursor = Some(cursor + 1);
+                    self.force_selection_update = true;
+                    false
+                } else {
+                    self.session.type_english(actual_ch, &chinese_buf)
+                }
+            } else {
+                self.session.type_english(actual_ch, &chinese_buf)
+            };
 
             if direct_commit {
-                sink.commit_text(&actual_ch.to_string());
-                return true;
+                if had_bopomofo {
+                    let _ = sink.end_preedit();
+                }
+                // With no active composition Windows can deliver ordinary
+                // English directly to the application. type_english already
+                // marked a temporary Shift gesture as used.
+                return false;
             }
             self.send_update(sink);
             return true;
         }
 
-        if vkey == VK_BACK {
-            if self.session.backspace_english() {
-                self.send_update(sink);
-                return true;
-            }
-            // Fall through
+        if vkey == VK_BACK && self.session.backspace_english() {
+            self.send_update(sink);
+            return true;
         }
+        // Backspace with no English content falls through.
 
         if vkey == VK_RETURN {
-            let chinese_buf = self
-                .editor
-                .as_ref()
-                .map_or(String::new(), |e| e.display());
+            let chinese_buf = self.editor.as_ref().map_or(String::new(), |e| e.display());
             let commit_str = self.session.commit_all(&chinese_buf);
             if let Some(ed) = self.editor.as_mut() {
                 ed.clear();
             }
+            self.mixed_display_cursor = None;
             if !commit_str.is_empty() {
-                sink.commit_text(&commit_str);
+                self.emit_commit(&commit_str, sink);
             }
             sink.hide_candidates();
             return true;
@@ -516,7 +753,8 @@ impl Controller {
             if let Some(ed) = self.editor.as_mut() {
                 ed.clear();
             }
-            sink.end_preedit();
+            self.mixed_display_cursor = None;
+            let _ = sink.end_preedit();
             sink.hide_candidates();
             return true;
         }
@@ -527,17 +765,193 @@ impl Controller {
         false
     }
 
+    fn handle_mixed_navigation(&mut self, vkey: u32, sink: &dyn InputSink) -> bool {
+        let (chinese, bopomofo) = self.current_buffers();
+        self.session.resync_chinese(&chinese);
+
+        // Keep an unfinished syllable under chewing's cursor control. The
+        // session's display-level mapping treats bopomofo as a separate region
+        // and cannot safely move it across interleaved English segments.
+        if !bopomofo.is_empty() {
+            if let Some(evt) = vkey_to_keyboard_event(vkey, '\0', false, false, false)
+                && let Some(editor) = self.editor.as_mut()
+            {
+                let _ = editor.process_keyevent(evt);
+            }
+            self.mixed_display_cursor = None;
+            self.force_selection_update = true;
+            self.send_update(sink);
+            return true;
+        }
+
+        let (display, current) = self.build_display(&chinese, &bopomofo);
+        let display_len = display.chars().count();
+
+        self.mixed_display_cursor = match vkey {
+            VK_LEFT => Some(current.saturating_sub(1)),
+            VK_RIGHT if current + 1 >= display_len => None,
+            VK_RIGHT => Some(current + 1),
+            VK_HOME => Some(0),
+            VK_END => None,
+            _ => self.mixed_display_cursor,
+        };
+        self.force_selection_update = true;
+        self.send_update(sink);
+        true
+    }
+
+    fn insert_inline_ascii(&mut self, ch: char, sink: &dyn InputSink) -> bool {
+        if let Some(editor) = self.editor.as_mut()
+            && !editor.syllable_buffer_display().is_empty()
+        {
+            editor.clear_syllable_editor();
+        }
+        let (chinese, bopomofo) = self.current_buffers();
+        self.session.resync_chinese(&chinese);
+        let (display, cursor) = self.build_display(&chinese, &bopomofo);
+        let display_len = display.chars().count();
+        let cursor = cursor.min(display_len);
+        if self
+            .session
+            .insert_english_at(ch, cursor, &chinese, &bopomofo)
+        {
+            self.mixed_display_cursor = self
+                .mixed_display_cursor
+                .map(|explicit_cursor| explicit_cursor + 1);
+            self.force_selection_update = self.mixed_display_cursor.is_some();
+            self.send_update(sink);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn handle_mixed_backspace(&mut self, sink: &dyn InputSink) -> bool {
+        let (chinese, bopomofo) = self.current_buffers();
+        self.session.resync_chinese(&chinese);
+
+        // An unfinished syllable is always the first thing Backspace removes,
+        // even if a display-level cursor was previously shown elsewhere.
+        if !bopomofo.is_empty() {
+            if let Some(evt) = vkey_to_keyboard_event(VK_BACK, '\0', false, false, false)
+                && let Some(editor) = self.editor.as_mut()
+            {
+                let _ = editor.process_keyevent(evt);
+            }
+            self.mixed_display_cursor = None;
+            self.send_update(sink);
+            return true;
+        }
+
+        let (display, cursor) = self.build_display(&chinese, &bopomofo);
+        let display_len = display.chars().count();
+        let cursor = cursor.min(display_len);
+        if cursor == 0 {
+            return true;
+        }
+
+        match self.session.delete_at(cursor, &chinese, &bopomofo) {
+            1 => {
+                self.mixed_display_cursor = self.session.has_mixed_content().then_some(cursor - 1);
+                self.force_selection_update = true;
+                self.send_update(sink);
+                true
+            }
+            2 => {
+                let chewing_cursor = self
+                    .session
+                    .display_to_chewing_cursor(cursor, &chinese, &bopomofo);
+                if chewing_cursor >= 0 {
+                    self.sync_editor_cursor(chewing_cursor as usize);
+                }
+                if let Some(evt) = vkey_to_keyboard_event(VK_BACK, '\0', false, false, false)
+                    && let Some(ed) = self.editor.as_mut()
+                {
+                    let _ = ed.process_keyevent(evt);
+                }
+                let new_chinese = self.editor.as_ref().map_or(String::new(), |e| e.display());
+                self.session.resync_chinese(&new_chinese);
+                self.mixed_display_cursor = Some(cursor - 1);
+                self.force_selection_update = true;
+                self.send_update(sink);
+                true
+            }
+            _ => true,
+        }
+    }
+
+    fn sync_editor_cursor(&mut self, target: usize) {
+        let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
+        let target = target.min(editor.len());
+        while editor.cursor() > target {
+            let Some(evt) = vkey_to_keyboard_event(VK_LEFT, '\0', false, false, false) else {
+                break;
+            };
+            let before = editor.cursor();
+            let _ = editor.process_keyevent(evt);
+            if editor.cursor() == before {
+                break;
+            }
+        }
+        while editor.cursor() < target {
+            let Some(evt) = vkey_to_keyboard_event(VK_RIGHT, '\0', false, false, false) else {
+                break;
+            };
+            let before = editor.cursor();
+            let _ = editor.process_keyevent(evt);
+            if editor.cursor() == before {
+                break;
+            }
+        }
+    }
+
+    fn current_buffers(&self) -> (String, String) {
+        self.editor.as_ref().map_or_else(
+            || (String::new(), String::new()),
+            |editor| (editor.display(), editor.syllable_buffer_display()),
+        )
+    }
+
+    fn emit_commit(&mut self, text: &str, sink: &dyn InputSink) -> bool {
+        if sink.commit_text(text) {
+            self.pending_commit = None;
+            true
+        } else {
+            self.pending_commit = Some(text.to_string());
+            false
+        }
+    }
+
+    fn retry_pending_commit(&mut self, sink: &dyn InputSink) -> bool {
+        let Some(text) = self.pending_commit.as_deref() else {
+            return true;
+        };
+        if sink.commit_text(text) {
+            self.pending_commit = None;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Candidate-mode key handling. Returns Some(handled) if intercepted.
-    fn handle_candidate_key(
-        &mut self,
-        vkey: u32,
-        ch: char,
-        sink: &dyn InputSink,
-    ) -> Option<bool> {
+    fn handle_candidate_key(&mut self, vkey: u32, ch: char, sink: &dyn InputSink) -> Option<bool> {
         // Up/Down — UI-only highlight navigation
         if vkey == VK_UP {
-            if self.candidate_highlight > 0 {
-                self.candidate_highlight -= 1;
+            let count = self
+                .editor
+                .as_ref()
+                .and_then(|e| e.paginated_candidates().ok())
+                .map_or(0, |c| c.len())
+                .min(self.selection_keys.len());
+            if count > 0 {
+                self.candidate_highlight = if self.candidate_highlight == 0 {
+                    count - 1
+                } else {
+                    self.candidate_highlight - 1
+                };
                 self.refresh_candidates(sink);
             }
             return Some(true);
@@ -549,16 +963,34 @@ impl Controller {
                 .and_then(|e| e.paginated_candidates().ok())
                 .map_or(0, |c| c.len());
             let limit = count.min(self.selection_keys.len());
-            if limit > 0 && self.candidate_highlight + 1 < limit {
-                self.candidate_highlight += 1;
+            if limit > 0 {
+                self.candidate_highlight = (self.candidate_highlight + 1) % limit;
                 self.refresh_candidates(sink);
             }
             return Some(true);
         }
 
-        // Left — prev page (engine)
-        if vkey == VK_LEFT {
-            let evt = vkey_to_keyboard_event(vkey, '\0', false, false, false)?;
+        if vkey == VK_HOME {
+            self.candidate_highlight = 0;
+            self.refresh_candidates(sink);
+            return Some(true);
+        }
+
+        if vkey == VK_END {
+            let count = self
+                .editor
+                .as_ref()
+                .and_then(|e| e.paginated_candidates().ok())
+                .map_or(0, |c| c.len())
+                .min(self.selection_keys.len());
+            self.candidate_highlight = count.saturating_sub(1);
+            self.refresh_candidates(sink);
+            return Some(true);
+        }
+
+        // Left / PageUp — previous page (engine)
+        if vkey == VK_LEFT || vkey == VK_PRIOR {
+            let evt = vkey_to_keyboard_event(VK_LEFT, '\0', false, false, false)?;
             if let Some(ed) = self.editor.as_mut() {
                 ed.process_keyevent(evt);
             }
@@ -567,9 +999,10 @@ impl Controller {
             return Some(true);
         }
 
-        // Right / Space — next page (engine)
-        if vkey == VK_RIGHT || vkey == VK_SPACE {
-            let evt = vkey_to_keyboard_event(vkey, '\0', false, false, false)?;
+        // Right / PageDown / Space — next page (engine)
+        if vkey == VK_RIGHT || vkey == VK_NEXT || vkey == VK_SPACE {
+            let engine_vkey = if vkey == VK_SPACE { VK_SPACE } else { VK_RIGHT };
+            let evt = vkey_to_keyboard_event(engine_vkey, '\0', false, false, false)?;
             if let Some(ed) = self.editor.as_mut() {
                 ed.process_keyevent(evt);
             }
@@ -581,6 +1014,16 @@ impl Controller {
         // Enter — pick highlighted
         if vkey == VK_RETURN {
             let idx = self.candidate_highlight;
+            let selected = self
+                .editor
+                .as_ref()
+                .and_then(|e| e.paginated_candidates().ok())
+                .and_then(|candidates| candidates.get(idx).cloned());
+            crate::qb_dbg!(
+                "candidate_select method=enter index={} value={:?}",
+                idx,
+                selected
+            );
             if let Some(ed) = self.editor.as_mut() {
                 let _ = ed.select(idx);
             }
@@ -638,6 +1081,17 @@ impl Controller {
                 .and_then(|e| e.paginated_candidates().ok())
                 .map_or(0, |c| c.len());
             if idx < page_count {
+                let selected = self
+                    .editor
+                    .as_ref()
+                    .and_then(|e| e.paginated_candidates().ok())
+                    .and_then(|candidates| candidates.get(idx).cloned());
+                crate::qb_dbg!(
+                    "candidate_select method=key key={:?} index={} value={:?}",
+                    ch,
+                    idx,
+                    selected
+                );
                 if let Some(ed) = self.editor.as_mut() {
                     let _ = ed.select(idx);
                 }
@@ -750,6 +1204,10 @@ impl Controller {
             }
 
             let target = targets[0].clone();
+            crate::qb_dbg!(
+                "candidate_select method=space_cycle step=1 value={:?}",
+                target
+            );
             if let Some(idx) = candidates.iter().position(|c| *c == target) {
                 if let Some(ed) = self.editor.as_mut() {
                     let _ = ed.select(idx);
@@ -787,6 +1245,11 @@ impl Controller {
             .unwrap_or_default();
 
         let target = self.space_cycle_targets[self.space_cycle_step].clone();
+        crate::qb_dbg!(
+            "candidate_select method=space_cycle step={} value={:?}",
+            self.space_cycle_step + 1,
+            target
+        );
         if let Some(idx) = candidates.iter().position(|c| *c == target) {
             if let Some(ed) = self.editor.as_mut() {
                 let _ = ed.select(idx);
