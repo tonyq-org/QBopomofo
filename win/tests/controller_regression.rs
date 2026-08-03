@@ -4,7 +4,7 @@ use std::{
 };
 
 use qbopomofo_tip::controller::{
-    Controller, InputSink, VK_BACK, VK_DOWN, VK_LEFT, VK_RETURN, VK_SHIFT, VK_UP,
+    Controller, EditOutcome, InputSink, VK_BACK, VK_DOWN, VK_LEFT, VK_RETURN, VK_SHIFT, VK_UP,
 };
 use qbopomofo_tip::preferences::{CandidateOrdering, Preferences};
 use chewing::typing_mode::CapsLockBehavior;
@@ -16,7 +16,10 @@ struct RecordingSink {
     commits: RefCell<Vec<String>>,
     candidate_pages: RefCell<Vec<Vec<String>>>,
     candidate_highlights: RefCell<Vec<usize>>,
+    preedit_rejections_remaining: Cell<usize>,
     commit_failures_remaining: Cell<usize>,
+    commit_rejections_remaining: Cell<usize>,
+    context_id: Cell<usize>,
     end_preedit_count: Cell<usize>,
 }
 
@@ -27,20 +30,34 @@ impl InputSink for RecordingSink {
         cursor_utf16: usize,
         _needs_caret_position: bool,
         _update_selection: bool,
-    ) -> Option<(i32, i32)> {
+    ) -> EditOutcome<Option<(i32, i32)>> {
+        let rejections = self.preedit_rejections_remaining.get();
+        if rejections > 0 {
+            self.preedit_rejections_remaining.set(rejections - 1);
+            return EditOutcome::Rejected;
+        }
         self.preedits.borrow_mut().push(text.to_string());
         self.cursors_utf16.borrow_mut().push(cursor_utf16);
-        None
+        EditOutcome::Applied(None)
     }
 
-    fn commit_text(&self, text: &str) -> bool {
+    fn commit_text(&self, text: &str) -> EditOutcome<()> {
+        let rejections = self.commit_rejections_remaining.get();
+        if rejections > 0 {
+            self.commit_rejections_remaining.set(rejections - 1);
+            return EditOutcome::Rejected;
+        }
         let failures = self.commit_failures_remaining.get();
         if failures > 0 {
             self.commit_failures_remaining.set(failures - 1);
-            return false;
+            return EditOutcome::Retryable;
         }
         self.commits.borrow_mut().push(text.to_string());
-        true
+        EditOutcome::Applied(())
+    }
+
+    fn edit_context_id(&self) -> usize {
+        self.context_id.get()
     }
 
     fn end_preedit(&self) -> bool {
@@ -310,6 +327,39 @@ fn english_without_composition_is_passed_through() {
 }
 
 #[test]
+fn temporary_shift_english_without_composition_is_committed_by_tip() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+
+    controller.on_key_down(VK_SHIFT, '\0', true, false, false, &sink);
+    assert!(controller.should_eat_key_down(0x41, 'A', false, false));
+    assert!(controller.on_key_down(0x41, 'A', true, false, false, &sink));
+    controller.on_key_up(VK_SHIFT, &sink);
+
+    assert_eq!(sink.commits.borrow().as_slice(), ["A"]);
+    assert!(controller.should_eat_key_down(0x48, 'h', false, false));
+}
+
+#[test]
+fn temporary_shift_english_replaces_lone_unfinished_bopomofo() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+
+    type_chars(&mut controller, "h", &sink); // unfinished ㄘ only
+    controller.on_key_down(VK_SHIFT, '\0', true, false, false, &sink);
+    assert!(controller.should_eat_key_down(0x41, 'A', false, false));
+    assert!(controller.on_key_down(0x41, 'A', true, false, false, &sink));
+    controller.on_key_up(VK_SHIFT, &sink);
+
+    assert_eq!(sink.commits.borrow().as_slice(), ["A"]);
+    assert!(!controller.has_content());
+}
+
+#[test]
 fn rejected_platform_commit_is_retried_without_duplication() {
     let Some(mut controller) = activated_controller() else {
         return;
@@ -336,6 +386,76 @@ fn rejected_platform_commit_is_retried_without_duplication() {
         sink.preedits.borrow().last().map(String::as_str),
         Some("ㄘ")
     );
+}
+
+#[test]
+fn terminal_commit_rejection_does_not_trap_enter() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+    sink.commit_rejections_remaining.set(1);
+
+    type_chars(&mut controller, "hk4", &sink); // 測
+    assert!(controller.on_key_down(VK_RETURN, '\r', false, false, false, &sink));
+
+    assert!(sink.commits.borrow().is_empty());
+    assert!(!controller.has_content());
+    assert!(!controller.should_eat_key_down(VK_RETURN, '\r', false, false));
+    assert!(!controller.on_key_down(VK_RETURN, '\r', false, false, false, &sink));
+}
+
+#[test]
+fn repeated_retryable_commit_failure_is_bounded() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+    sink.commit_failures_remaining.set(2);
+
+    type_chars(&mut controller, "hk4", &sink); // 測
+    controller.on_key_down(VK_RETURN, '\r', false, false, false, &sink);
+    assert!(controller.has_content(), "first transient failure is pending");
+
+    assert!(controller.should_eat_key_down(VK_RETURN, '\r', false, false));
+    assert!(!controller.on_key_down(VK_RETURN, '\r', false, false, false, &sink));
+    assert!(!controller.has_content(), "failed retry must release input");
+    assert!(sink.commits.borrow().is_empty());
+}
+
+#[test]
+fn pending_commit_is_not_replayed_into_another_context() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+    sink.context_id.set(1);
+    sink.commit_failures_remaining.set(1);
+
+    type_chars(&mut controller, "hk4", &sink); // 測
+    controller.on_key_down(VK_RETURN, '\r', false, false, false, &sink);
+    assert!(controller.has_content());
+
+    sink.context_id.set(2);
+    assert!(controller.should_eat_key_down(0x70, '\0', false, false)); // F1
+    assert!(!controller.on_key_down(0x70, '\0', false, false, false, &sink));
+    assert!(!controller.has_content());
+    assert!(sink.commits.borrow().is_empty());
+}
+
+#[test]
+fn rejected_preedit_clears_invisible_controller_input() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+    sink.preedit_rejections_remaining.set(1);
+
+    assert!(controller.on_key_down(0x48, 'h', false, false, false, &sink));
+
+    assert!(!controller.has_content());
+    assert!(sink.preedits.borrow().is_empty());
+    assert!(!controller.should_eat_key_down(VK_RETURN, '\r', false, false));
 }
 
 #[test]

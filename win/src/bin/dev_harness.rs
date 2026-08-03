@@ -39,7 +39,7 @@
 
 use std::io::{self, BufRead, Write};
 
-use qbopomofo_tip::controller::{Controller, InputSink};
+use qbopomofo_tip::controller::{Controller, EditOutcome, InputSink};
 
 struct StdoutSink;
 
@@ -59,18 +59,18 @@ impl InputSink for StdoutSink {
         _cursor_utf16: usize,
         _needs_caret_position: bool,
         _update_selection: bool,
-    ) -> Option<(i32, i32)> {
+    ) -> EditOutcome<Option<(i32, i32)>> {
         if text.is_empty() {
             self.println("PREEDIT: \"\"");
         } else {
             self.println(&format!("PREEDIT: {:?}", text));
         }
-        None
+        EditOutcome::Applied(None)
     }
 
-    fn commit_text(&self, text: &str) -> bool {
+    fn commit_text(&self, text: &str) -> EditOutcome<()> {
         self.println(&format!("COMMIT: {:?}", text));
-        true
+        EditOutcome::Applied(())
     }
 
     fn end_preedit(&self) -> bool {

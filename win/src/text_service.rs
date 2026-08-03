@@ -21,13 +21,14 @@ use windows::Win32::UI::TextServices::{
     ITfFnConfigure_Impl, ITfFunctionProvider, ITfFunctionProvider_Impl,
     ITfFunction_Impl, ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfSourceSingle,
     ITfTextInputProcessor, ITfTextInputProcessor_Impl, ITfTextInputProcessorEx,
-    ITfTextInputProcessorEx_Impl, ITfThreadMgr,
+    ITfTextInputProcessorEx_Impl, ITfThreadMgr, TF_E_DISCONNECTED, TF_E_READONLY,
+    TS_SD_READONLY,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{BSTR, BOOL, GUID, IUnknown, IUnknownImpl, Interface, PCWSTR, Ref, implement, w};
 
 use crate::candidate_window::CandidateWindow;
-use crate::controller::{Controller, InputSink};
+use crate::controller::{Controller, EditOutcome, InputSink};
 use crate::edit_session::{self, EditOp, EditResult};
 use crate::key_event::translate_char;
 use crate::{com_method, com_method_bool, com_method_unit};
@@ -98,14 +99,12 @@ impl Default for QBopomofoTextService {
 }
 
 impl QBopomofoTextService_Impl {
-    fn apply_pending_composition_termination(&self) {
-        if !self.composition_termination_pending.replace(false) {
-            return;
-        }
-        // The callback can arrive re-entrantly while an update edit session is
-        // still unwinding. Do not let that session's returned handle revive a
-        // composition the host has already terminated.
+    fn clear_input_without_edit(&self) {
+        // A read-only/disconnected context cannot accept any cleanup edit
+        // session. Forget the stale COM composition handle and clear the
+        // controller so it cannot keep consuming keys for pending text.
         *self.composition.borrow_mut() = None;
+        *self.tested_key.borrow_mut() = None;
         let null_sink = NullSink {
             candidate_window: &self.candidate_window,
         };
@@ -115,6 +114,29 @@ impl QBopomofoTextService_Impl {
             self.composition_termination_pending.set(true);
         }
     }
+
+    fn apply_pending_composition_termination(&self) {
+        if !self.composition_termination_pending.replace(false) {
+            return;
+        }
+        // The callback can arrive re-entrantly while an update edit session is
+        // still unwinding. Do not let that session's returned handle revive a
+        // composition the host has already terminated.
+        self.clear_input_without_edit();
+    }
+}
+
+fn context_is_read_only(context: &ITfContext) -> bool {
+    unsafe { context.GetStatus() }
+        .is_ok_and(|status| status_flags_are_read_only(status.dwDynamicFlags))
+}
+
+fn status_flags_are_read_only(dynamic_flags: u32) -> bool {
+    dynamic_flags & TS_SD_READONLY != 0
+}
+
+fn is_terminal_edit_error(error: &windows::core::Error) -> bool {
+    matches!(error.code(), TF_E_READONLY | TF_E_DISCONNECTED)
 }
 
 fn get_modifiers() -> (bool, bool, bool) {
@@ -337,12 +359,19 @@ impl ITfKeyEventSink_Impl for QBopomofoTextService_Impl {
 
     fn OnTestKeyDown(
         &self,
-        _pic: Ref<ITfContext>,
+        pic: Ref<ITfContext>,
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> windows::core::Result<BOOL> {
         com_method_bool!("OnTestKeyDown", {
             if !self.state.borrow().activated {
+                return Ok(BOOL(0));
+            }
+            if let Some(context) = pic.clone()
+                && context_is_read_only(&context)
+            {
+                qb_dbg!("OnTestKeyDown: read-only context; releasing input state");
+                self.clear_input_without_edit();
                 return Ok(BOOL(0));
             }
             let vkey = wparam.0 as u32;
@@ -406,6 +435,11 @@ impl ITfKeyEventSink_Impl for QBopomofoTextService_Impl {
             let Some(context) = pic.clone() else {
                 return Ok(BOOL(0));
             };
+            if context_is_read_only(&context) {
+                qb_dbg!("OnKeyDown: read-only context; key passed through");
+                self.clear_input_without_edit();
+                return Ok(BOOL(0));
+            }
             let tid = self.state.borrow().client_id;
             let comp_sink: ITfCompositionSink = self.to_interface();
 
@@ -546,7 +580,12 @@ impl<'a> InputSink for TsfSink<'a> {
         cursor_utf16: usize,
         needs_caret_position: bool,
         update_selection: bool,
-    ) -> Option<(i32, i32)> {
+    ) -> EditOutcome<Option<(i32, i32)>> {
+        if context_is_read_only(&self.context) {
+            qb_dbg!("update_preedit: context is read-only");
+            *self.composition.borrow_mut() = None;
+            return EditOutcome::Rejected;
+        }
         let composition = self.composition.borrow().clone();
         let _termination_guard = text
             .is_empty()
@@ -566,16 +605,24 @@ impl<'a> InputSink for TsfSink<'a> {
         match result {
             Ok(EditResult::Composition(new_comp, pos)) => {
                 *self.composition.borrow_mut() = new_comp;
-                pos
+                EditOutcome::Applied(pos)
             }
             Err(e) => {
                 qb_dbg!("update_preedit: edit session failed: {:?}", e);
-                None
+                if is_terminal_edit_error(&e) {
+                    *self.composition.borrow_mut() = None;
+                }
+                EditOutcome::Rejected
             }
         }
     }
 
-    fn commit_text(&self, text: &str) -> bool {
+    fn commit_text(&self, text: &str) -> EditOutcome<()> {
+        if context_is_read_only(&self.context) {
+            qb_dbg!("commit_text: context is read-only; rejecting without retry");
+            *self.composition.borrow_mut() = None;
+            return EditOutcome::Rejected;
+        }
         let composition = self.composition.borrow().clone();
         let _termination_guard = ScopedTerminationFlag::new(self.self_terminating_composition);
         match edit_session::request_edit_session(
@@ -591,18 +638,31 @@ impl<'a> InputSink for TsfSink<'a> {
                 if let Some(cw) = self.candidate_window.borrow().as_ref() {
                     cw.hide();
                 }
-                true
+                EditOutcome::Applied(())
             }
             Ok(EditResult::Composition(Some(comp), _)) => {
                 *self.composition.borrow_mut() = Some(comp);
                 qb_dbg!("commit_text: edit session unexpectedly kept composition");
-                false
+                EditOutcome::Retryable
             }
             Err(e) => {
                 qb_dbg!("commit_text: edit session failed: {:?}", e);
-                false
+                if is_terminal_edit_error(&e) {
+                    *self.composition.borrow_mut() = None;
+                    EditOutcome::Rejected
+                } else {
+                    EditOutcome::Retryable
+                }
             }
         }
+    }
+
+    fn edit_context_id(&self) -> usize {
+        self.context
+            .cast::<IUnknown>()
+            .map_or(self.context.as_raw() as usize, |identity| {
+                identity.as_raw() as usize
+            })
     }
 
     fn end_preedit(&self) -> bool {
@@ -626,6 +686,9 @@ impl<'a> InputSink for TsfSink<'a> {
             }
             Err(e) => {
                 qb_dbg!("end_preedit: edit session failed: {:?}", e);
+                if is_terminal_edit_error(&e) {
+                    *self.composition.borrow_mut() = None;
+                }
                 false
             }
         }
@@ -669,11 +732,11 @@ impl<'a> InputSink for NullSink<'a> {
         _cursor_utf16: usize,
         _needs_caret_position: bool,
         _update_selection: bool,
-    ) -> Option<(i32, i32)> {
-        None
+    ) -> EditOutcome<Option<(i32, i32)>> {
+        EditOutcome::Applied(None)
     }
-    fn commit_text(&self, _text: &str) -> bool {
-        true
+    fn commit_text(&self, _text: &str) -> EditOutcome<()> {
+        EditOutcome::Applied(())
     }
     fn end_preedit(&self) -> bool {
         true
@@ -696,9 +759,11 @@ impl<'a> InputSink for NullSink<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::QBopomofoTextService;
+    use super::{QBopomofoTextService, status_flags_are_read_only};
     use crate::com::CLSID_QBOPOMOFO;
-    use windows::Win32::UI::TextServices::{ITfFnConfigure, ITfFunctionProvider};
+    use windows::Win32::UI::TextServices::{
+        ITfFnConfigure, ITfFunctionProvider, TS_SD_LOADING, TS_SD_READONLY,
+    };
     use windows::core::{GUID, IUnknown, Interface};
 
     #[test]
@@ -714,5 +779,13 @@ mod tests {
                 .expect("configure function")
         };
         assert!(function.cast::<ITfFnConfigure>().is_ok());
+    }
+
+    #[test]
+    fn recognizes_read_only_context_status() {
+        assert!(!status_flags_are_read_only(0));
+        assert!(!status_flags_are_read_only(TS_SD_LOADING));
+        assert!(status_flags_are_read_only(TS_SD_READONLY));
+        assert!(status_flags_are_read_only(TS_SD_LOADING | TS_SD_READONLY));
     }
 }

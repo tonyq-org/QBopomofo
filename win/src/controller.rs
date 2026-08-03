@@ -37,6 +37,18 @@ pub const VK_PRIOR: u32 = 0x21;
 pub const VK_NEXT: u32 = 0x22;
 
 const MIXED_AUTO_COMMIT_THRESHOLD: usize = 20;
+const MAX_PENDING_COMMIT_RETRIES: u8 = 1;
+
+/// Result of a platform edit request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditOutcome<T> {
+    /// The document accepted the edit.
+    Applied(T),
+    /// The edit failed for a potentially transient reason and may be retried.
+    Retryable,
+    /// The document cannot accept this edit (for example, a read-only context).
+    Rejected,
+}
 
 /// Events the controller emits — the platform adapter renders them.
 ///
@@ -47,19 +59,27 @@ pub trait InputSink {
     /// Begin or update a preedit (composition) with the given display text.
     /// The implementation should decide whether to start a fresh composition
     /// or replace the current one. Returns the caret screen position if
-    /// known, so the controller can remember where to pop candidates.
+    /// known, so the controller can remember where to pop candidates. A
+    /// rejected update means the controller must discard its invisible input
+    /// state instead of continuing to consume keys for an unwritable context.
     fn update_preedit(
         &self,
         text: &str,
         cursor_utf16: usize,
         needs_caret_position: bool,
         update_selection: bool,
-    ) -> Option<(i32, i32)>;
+    ) -> EditOutcome<Option<(i32, i32)>>;
 
     /// Commit the given text to the underlying document and end any preedit.
-    /// Returns whether the platform actually applied the commit.  TSF can
-    /// accept RequestEditSession itself while rejecting the inner session.
-    fn commit_text(&self, text: &str) -> bool;
+    /// TSF can accept RequestEditSession itself while rejecting the inner
+    /// session, so retryable and terminal failures are distinguished.
+    fn commit_text(&self, text: &str) -> EditOutcome<()>;
+
+    /// Stable identity of the destination document for the duration of an
+    /// edit. Pending commits must never be replayed into a different context.
+    fn edit_context_id(&self) -> usize {
+        0
+    }
 
     /// End the current preedit without committing anything.
     fn end_preedit(&self) -> bool;
@@ -102,11 +122,17 @@ pub struct Controller {
     // A synchronous TSF edit session can be rejected even though the outer
     // COM call succeeds. Keep a commit until the platform confirms it was
     // applied so the next key cannot silently lose or duplicate text.
-    pending_commit: Option<String>,
+    pending_commit: Option<PendingCommit>,
     force_selection_update: bool,
     caps_english_active: bool,
 
     activated: bool,
+}
+
+struct PendingCommit {
+    text: String,
+    context_id: usize,
+    retries_remaining: u8,
 }
 
 impl Controller {
@@ -484,11 +510,16 @@ impl Controller {
     }
 
     pub fn on_composition_terminated(&mut self, sink: &dyn InputSink) {
+        self.clear_input_state(sink);
+    }
+
+    fn clear_input_state(&mut self, sink: &dyn InputSink) {
         self.session.clear();
         if let Some(ed) = self.editor.as_mut() {
             ed.clear();
         }
         self.reset_space_cycle();
+        self.candidate_highlight = 0;
         self.mixed_display_cursor = None;
         self.pending_commit = None;
         self.force_selection_update = false;
@@ -536,12 +567,20 @@ impl Controller {
         let needs_caret_position = self.is_selecting();
         let update_selection = self.force_selection_update || cursor_chars < display_len;
         self.force_selection_update = false;
-        let caret =
-            sink.update_preedit(&text, cursor_utf16, needs_caret_position, update_selection);
-        if let Some(p) = caret {
-            self.last_caret_pos = Some(p);
+        match sink.update_preedit(&text, cursor_utf16, needs_caret_position, update_selection) {
+            EditOutcome::Applied(caret) => {
+                if let Some(p) = caret {
+                    self.last_caret_pos = Some(p);
+                }
+                self.refresh_candidates(sink);
+            }
+            EditOutcome::Retryable | EditOutcome::Rejected => {
+                crate::qb_dbg!(
+                    "preedit update rejected; clearing controller input state"
+                );
+                self.clear_input_state(sink);
+            }
         }
-        self.refresh_candidates(sink);
     }
 
     /// Re-render candidates based on current editor state.
@@ -719,9 +758,16 @@ impl Controller {
                 if had_bopomofo {
                     let _ = sink.end_preedit();
                 }
-                // With no active composition Windows can deliver ordinary
-                // English directly to the application. type_english already
-                // marked a temporary Shift gesture as used.
+                if self.session.is_shift_held() || had_bopomofo {
+                    // OnTestKeyDown already said this key would be handled by
+                    // the TIP. Returning it to Windows here can drop the key
+                    // in hosts that trust that prediction, so insert it
+                    // through TSF and keep the two callbacks consistent.
+                    self.emit_commit(&actual_ch.to_string(), sink);
+                    return true;
+                }
+                // Ordinary English mode with no composition is not claimed
+                // by OnTestKeyDown and remains native application input.
                 return false;
             }
             self.send_update(sink);
@@ -915,24 +961,56 @@ impl Controller {
     }
 
     fn emit_commit(&mut self, text: &str, sink: &dyn InputSink) -> bool {
-        if sink.commit_text(text) {
-            self.pending_commit = None;
-            true
-        } else {
-            self.pending_commit = Some(text.to_string());
-            false
+        match sink.commit_text(text) {
+            EditOutcome::Applied(()) => {
+                self.pending_commit = None;
+                true
+            }
+            EditOutcome::Retryable => {
+                self.pending_commit = Some(PendingCommit {
+                    text: text.to_string(),
+                    context_id: sink.edit_context_id(),
+                    retries_remaining: MAX_PENDING_COMMIT_RETRIES,
+                });
+                false
+            }
+            EditOutcome::Rejected => {
+                crate::qb_dbg!("commit permanently rejected; not retaining pending text");
+                self.pending_commit = None;
+                false
+            }
         }
     }
 
     fn retry_pending_commit(&mut self, sink: &dyn InputSink) -> bool {
-        let Some(text) = self.pending_commit.as_deref() else {
+        let Some(mut pending) = self.pending_commit.take() else {
             return true;
         };
-        if sink.commit_text(text) {
-            self.pending_commit = None;
-            true
-        } else {
-            false
+
+        if pending.context_id != sink.edit_context_id() {
+            crate::qb_dbg!(
+                "discarding pending commit after context change old={:#x} new={:#x}",
+                pending.context_id,
+                sink.edit_context_id()
+            );
+            return true;
+        }
+
+        match sink.commit_text(&pending.text) {
+            EditOutcome::Applied(()) => true,
+            EditOutcome::Rejected => {
+                crate::qb_dbg!("pending commit permanently rejected; releasing key input");
+                true
+            }
+            EditOutcome::Retryable if pending.retries_remaining > 1 => {
+                pending.retries_remaining -= 1;
+                self.pending_commit = Some(pending);
+                false
+            }
+            EditOutcome::Retryable => {
+                crate::qb_dbg!("pending commit retry limit reached; releasing key input");
+                true
+            }
         }
     }
 

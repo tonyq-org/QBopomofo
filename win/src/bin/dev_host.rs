@@ -33,7 +33,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use qbopomofo_tip::candidate_window::CandidateWindow;
-use qbopomofo_tip::controller::{Controller, InputSink};
+use qbopomofo_tip::controller::{Controller, EditOutcome, InputSink};
 use qbopomofo_tip::key_event::translate_char;
 
 const VK_SHIFT: i32 = 0x10;
@@ -133,7 +133,7 @@ impl<'a> InputSink for GuiSink<'a> {
         _cursor_utf16: usize,
         _needs_caret_position: bool,
         _update_selection: bool,
-    ) -> Option<(i32, i32)> {
+    ) -> EditOutcome<Option<(i32, i32)>> {
         self.replace_preedit_with(text);
         // Also reflect in the title for visibility while testing.
         let title = if text.is_empty() {
@@ -145,14 +145,14 @@ impl<'a> InputSink for GuiSink<'a> {
         unsafe {
             let _ = SetWindowTextW(self.parent, PCWSTR(w.as_ptr()));
         }
-        caret_screen_pos(self.edit)
+        EditOutcome::Applied(caret_screen_pos(self.edit))
     }
 
-    fn commit_text(&self, text: &str) -> bool {
+    fn commit_text(&self, text: &str) -> EditOutcome<()> {
         // Replace preedit (if any) with the committed text and clear tracker.
         self.replace_preedit_with(text);
         *self.preedit.borrow_mut() = None;
-        true
+        EditOutcome::Applied(())
     }
 
     fn end_preedit(&self) -> bool {
