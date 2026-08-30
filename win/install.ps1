@@ -1,14 +1,24 @@
 # QBopomofo Windows TSF - Build and Install (PowerShell)
-# Must be run as Administrator
 #
 # Usage:
-#   .\install.ps1          - Release build + register
-#   .\install.ps1 -Debug   - Debug build + register + enable debug logging
+#   .\install.ps1          - Release build + install
+#   .\install.ps1 -Debug   - Debug build + install + enable debug logging
+#
+# This script builds from source and stages a complete package; the actual
+# deployment (copy to %ProgramFiles%\QBopomofo, regsvr32, restart ctfmon,
+# Start Menu shortcut) is done by package\install.ps1, which self-elevates.
+#
+# Do NOT go back to registering win\target\$mode\qbopomofo_tip.dll directly.
+# The TIP locates dictionaries via its own DLL directory (see com::dll_dir and
+# ActivateEx), and target\ never contains the .dat files. Registering it there
+# makes AssetLoader find nothing and the engine silently falls back to the
+# builtin mini.dat, which wrecks candidate quality.
 
 param([switch]$Debug)
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$RepoRoot = Split-Path -Parent $ScriptDir
 
 if ($Debug) {
     $BuildMode = "debug"
@@ -29,26 +39,26 @@ try {
     Pop-Location
 }
 
-$DllPath = Join-Path $ScriptDir "target\$BuildMode\qbopomofo_tip.dll"
-if (-not (Test-Path $DllPath)) {
-    throw "DLL not found at $DllPath"
+$Dicts = @("tsi.dat", "word.dat", "symbols.dat", "swkb.dat")
+$DataDir = Join-Path $RepoRoot "data-provider\output"
+foreach ($d in $Dicts) {
+    if (-not (Test-Path (Join-Path $DataDir $d))) {
+        throw "找不到 $d — 請先執行 data-provider/build.sh 產生字典檔"
+    }
 }
 
-Write-Host "[*] Registering COM server..."
-$reg = Start-Process regsvr32 -ArgumentList "/s `"$DllPath`"" -Wait -PassThru -Verb RunAs
-if ($reg.ExitCode -ne 0) {
-    throw "regsvr32 failed (exit code $($reg.ExitCode)). Run as Administrator."
-}
+$Stage = Join-Path $ScriptDir "out\install-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 
-Write-Host "[*] Done! QBopomofo has been installed."
-Write-Host ""
-Write-Host "   To use it:"
-Write-Host "   1. Open Settings > Time & Language > Language & Region"
-Write-Host "   2. Click your language > Language options"
-Write-Host "   3. Add a keyboard > Q注音輸入法"
-Write-Host ""
-
-if ($Debug) {
-    Write-Host "   Debug log: $env:TEMP\qbopomofo.log"
-    Write-Host "   View with: Get-Content $env:TEMP\qbopomofo.log -Tail 50"
+foreach ($f in @("qbopomofo_tip.dll", "qbopomofo_settings.exe")) {
+    $src = Join-Path $ScriptDir "target\$BuildMode\$f"
+    if (-not (Test-Path $src)) { throw "Build output not found at $src" }
+    Copy-Item $src $Stage -Force
 }
+foreach ($d in $Dicts) { Copy-Item (Join-Path $DataDir $d) $Stage -Force }
+Copy-Item (Join-Path $ScriptDir "package\install.ps1") $Stage -Force
+Copy-Item (Join-Path $ScriptDir "package\uninstall.ps1") $Stage -Force
+
+Write-Host "[*] Staged package: $Stage"
+Write-Host "[*] Handing off to the packaged installer (will request admin)..."
+& (Join-Path $Stage "install.ps1")

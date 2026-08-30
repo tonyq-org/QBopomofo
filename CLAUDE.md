@@ -129,7 +129,8 @@ tail -f /tmp/qbopomofo.log
 | `cargo run --bin dev_harness` | 無 COM、無視窗的 CLI；stdin 打 `TYPE 5j/` / `KEY 0x0D` 驗輸入邏輯；設 `CHEWING_PATH` |
 | `win/run-dev.ps1` | 一鍵 build + 跑 `dev_host.exe`。**不是真 TSF host**：直接 link `Controller` + `CandidateWindow`，在 message pump 攔 `WM_KEYDOWN` 餵給 controller，commit 走 `EM_REPLACESEL`、preedit 顯示在標題列、候選用 `CandidateWindow`。驗輸入邏輯 + 候選視窗視覺，無 admin 無 regsvr32 |
 | `cargo run --bin qbopomofo_settings` | 啟動 Windows 原生設定頁；偏好寫入 `HKCU\Software\QBopomofo`。正式包另建立「Q注音設定」開始功能表捷徑 |
-| `win/install.ps1` | 正式 TSF 註冊到系統（HKLM regsvr32）。需要測 TSF edit session / composition lifecycle / 跨 app 行為時用這條 |
+| `win/install.ps1` | build + 打包 + 呼叫 `win/package/install.ps1` 正式部署。需要測 TSF edit session / composition lifecycle / 跨 app 行為時用這條 |
+| `win/package/install.ps1` | 真正的部署腳本（發行包也是這支）：複製 DLL + 4 個 `.dat` 到 `%ProgramFiles%\QBopomofo`、regsvr32、重啟 ctfmon、建捷徑 |
 
 ### 部署踩坑紀錄
 
@@ -138,6 +139,8 @@ tail -f /tmp/qbopomofo.log
 3. **Rust panic 跨 `extern "system"` 是 UB** — 所有 COM method 都要套 `com_method_*!` macro（`panic_guard.rs`），panic 會寫 `%TEMP%\qbopomofo_crash.log` 後回 `E_FAIL` 而不是拖 host 陪葬。
 4. **候選視窗 PaintData magic number** — WndProc 前先驗 `GWLP_USERDATA` 裡的 magic，防 DestroyWindow 後殘留訊息去 deref 野指標。
 5. **HiDPI / 多螢幕 / 深色模式** — `candidate_window.rs` 走 `GetDpiForWindow` + `MonitorFromPoint` + `AppsUseLightTheme` 三件套；改視覺時不要寫死 px。
+6. **字典檔必須和 DLL 放在同一個目錄** — TIP 用 `com::dll_dir()` 當 search path 傳給 `Editor::chewing`，而 `AssetLoader` 指定 search_path 後**不會**回退到 `CHEWING_PATH`。所以只 `regsvr32 win\target\release\qbopomofo_tip.dll` 會讓引擎一個 `.dat` 都找不到，靜靜掉到內建 `mini.dat`（`editor/mod.rs`），選字品質整個崩掉而且不會報錯。部署一定要連 `tsi.dat`/`word.dat`/`symbols.dat`/`swkb.dat` 一起複製過去。
+7. **OnTestKeyDown 說要吃、OnKeyDown 又不處理 → 按鍵直接消失** — 信任 OnTestKeyDown 預測的 host（Chromium/Electron 等）已經把該鍵吞掉了，此時 OnKeyDown 回 false 不會讓 app 收到。兩個 callback 的判斷必須一致；`controller.rs` 的 `handle_english_key` 和 `should_eat_key_down` 改動時特別要注意。
 
 ### Debug 模式
 
