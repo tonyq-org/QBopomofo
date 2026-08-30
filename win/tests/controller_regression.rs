@@ -4,7 +4,8 @@ use std::{
 };
 
 use qbopomofo_tip::controller::{
-    Controller, EditOutcome, InputSink, VK_BACK, VK_DOWN, VK_LEFT, VK_RETURN, VK_SHIFT, VK_UP,
+    Controller, EditOutcome, InputSink, VK_BACK, VK_DOWN, VK_LEFT, VK_RETURN, VK_SHIFT, VK_SPACE,
+    VK_UP,
 };
 use qbopomofo_tip::preferences::{CandidateOrdering, Preferences};
 use chewing::typing_mode::CapsLockBehavior;
@@ -110,6 +111,94 @@ fn smart_candidates_put_default_first_and_arrow_navigation_wraps() {
     controller.on_key_down(VK_RETURN, '\r', false, false, false, &sink);
     assert!(!controller.is_selecting());
     assert_eq!(sink.preedits.borrow().last().map(String::as_str), Some("測"));
+}
+
+/// After Enter commits the composition the buffer is empty, so a second Enter
+/// belongs to the application (send the message / insert a newline). Eating it
+/// leaves the user unable to submit.
+#[test]
+fn enter_after_commit_passes_through_to_the_app() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+
+    type_chars(&mut controller, "2l4", &sink); // 到
+    let first = controller.on_key_down(VK_RETURN, '\r', false, false, false, &sink);
+    assert!(first, "Enter should be eaten to commit the composition");
+    assert_eq!(sink.commits.borrow().len(), 1);
+
+    let second = controller.on_key_down(VK_RETURN, '\r', false, false, false, &sink);
+    assert!(
+        !second,
+        "Enter with an empty buffer must pass through to the application"
+    );
+}
+
+/// Space opens the candidate window, which is easy to hit by accident when
+/// separating Chinese from a following English word. Continuing to type must
+/// dismiss the window and enter the new syllable — not be swallowed.
+#[test]
+fn space_opened_candidates_do_not_swallow_following_bopomofo() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+
+    type_chars(&mut controller, "2l4", &sink); // 到
+    controller.on_key_down(VK_SPACE, ' ', false, false, false, &sink);
+    assert!(controller.is_selecting(), "space should open candidates");
+
+    type_chars(&mut controller, "b06", &sink); // 然 (ㄖㄢˊ) — 'b' is not a selection key
+    assert!(!controller.is_selecting());
+    assert_eq!(
+        sink.preedits.borrow().last().map(String::as_str),
+        Some("到然")
+    );
+}
+
+/// Every digit is a bopomofo key in the Dachen layout, so a digit typed right
+/// after an accidental space must start a syllable rather than pick a candidate.
+/// Regression for 跑到 committing as 跑纛.
+#[test]
+fn space_opened_candidates_do_not_let_digits_select() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+
+    type_chars(&mut controller, "2l4", &sink); // 到
+    controller.on_key_down(VK_SPACE, ' ', false, false, false, &sink);
+    assert!(controller.is_selecting());
+
+    type_chars(&mut controller, "284", &sink); // 大 (ㄉㄚˋ) — starts with ㄉ, i.e. '2'
+    assert!(!controller.is_selecting());
+    assert_eq!(
+        sink.preedits.borrow().last().map(String::as_str),
+        Some("到大")
+    );
+}
+
+/// The counterpart: opening the window deliberately with Down keeps selection
+/// keys live, so digits still pick candidates.
+#[test]
+fn arrow_opened_candidates_still_accept_selection_keys() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+
+    type_chars(&mut controller, "2l4", &sink); // 到
+    controller.on_key_down(VK_DOWN, '\0', false, false, false, &sink);
+
+    let page = sink.candidate_pages.borrow().last().cloned().unwrap();
+    let third = page[2].clone();
+
+    type_chars(&mut controller, "3", &sink);
+    assert_eq!(
+        sink.preedits.borrow().last().map(String::as_str),
+        Some(third.as_str())
+    );
 }
 
 #[test]
@@ -564,13 +653,78 @@ fn shift_modified_passthrough_key_does_not_toggle_english_mode() {
     let sink = RecordingSink::default();
 
     controller.on_key_down(VK_SHIFT, '\0', true, false, false, &sink);
-    assert!(controller.should_eat_key_down(VK_RETURN, '\r', false, false));
+    // Shift+Enter is not temporary-English input, so it must not be claimed:
+    // OnKeyDown would decline it and hosts that trust OnTestKeyDown drop the
+    // key, which is what made Shift+Enter do nothing in chat boxes.
+    assert!(!controller.should_eat_key_down(VK_RETURN, '\r', false, false));
     assert!(!controller.on_key_down(VK_RETURN, '\r', true, false, false, &sink));
     controller.on_key_up(VK_SHIFT, &sink);
 
     // Chinese mode still wants a normal letter; an accidental Shift toggle
     // would make this native English and return false.
     assert!(controller.should_eat_key_down(0x48, 'h', false, false));
+}
+
+/// English mode with an empty buffer used to eat Enter unconditionally, so
+/// chat boxes never saw the keystroke and the message could not be sent until
+/// some other key knocked the mode back to Chinese.
+#[test]
+fn enter_in_english_mode_without_content_reaches_the_application() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+
+    controller.on_key_down(VK_SHIFT, '\0', true, false, false, &sink);
+    controller.on_key_up(VK_SHIFT, &sink); // short press toggles English
+
+    assert!(!controller.has_content());
+    assert!(!controller.should_eat_key_down(VK_RETURN, '\r', false, false));
+    assert!(
+        !controller.on_key_down(VK_RETURN, '\r', false, false, false, &sink),
+        "Enter with nothing buffered must reach the application"
+    );
+    assert!(sink.commits.borrow().is_empty());
+}
+
+/// English mode still owns Enter while there is buffered text to flush.
+#[test]
+fn enter_in_english_mode_with_content_still_commits() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+
+    type_chars(&mut controller, "hk4", &sink); // 測
+    controller.on_key_down(VK_SHIFT, '\0', true, false, false, &sink);
+    controller.on_key_up(VK_SHIFT, &sink);
+
+    assert!(controller.has_content());
+    assert!(
+        controller.on_key_down(VK_RETURN, '\r', false, false, false, &sink),
+        "Enter must still flush buffered text"
+    );
+    assert_eq!(sink.commits.borrow().as_slice(), ["測"]);
+    assert!(!controller.has_content());
+}
+
+/// Shift+Enter must not be claimed by OnTestKeyDown and then declined by
+/// OnKeyDown — hosts that trust the prediction drop the key entirely.
+#[test]
+fn shift_enter_is_never_claimed_then_declined() {
+    let Some(mut controller) = activated_controller() else {
+        return;
+    };
+    let sink = RecordingSink::default();
+
+    controller.on_key_down(VK_SHIFT, '\0', true, false, false, &sink);
+
+    let claimed = controller.should_eat_key_down(VK_RETURN, '\r', false, false);
+    let handled = controller.on_key_down(VK_RETURN, '\r', false, false, false, &sink);
+    assert!(
+        !(claimed && !handled),
+        "claimed in OnTestKeyDown but declined in OnKeyDown drops the keystroke"
+    );
 }
 
 fn type_chars(controller: &mut Controller, input: &str, sink: &RecordingSink) {

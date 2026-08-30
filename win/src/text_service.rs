@@ -455,6 +455,24 @@ impl ITfKeyEventSink_Impl for QBopomofoTextService_Impl {
                 let mut controller = self.controller.borrow_mut();
                 controller.on_key_down(vkey, ch, shift, ctrl, caps, &sink)
             };
+            // Log the outcome, not just the arrival. `handled=true` with no
+            // edit session means the key was swallowed — indistinguishable
+            // from a clean pass-through unless we record it here. Guarded so
+            // the state reads cost nothing when logging is off.
+            if crate::debug_log::is_debug()
+                && let Ok(c) = self.controller.try_borrow()
+            {
+                qb_dbg!(
+                    "OnKeyDown: vk={:#x} handled={} content={} english={} shift_held={} \
+                     selecting={}",
+                    vkey,
+                    handled,
+                    c.has_content(),
+                    c.is_english_mode(),
+                    c.is_shift_held(),
+                    c.is_selecting()
+                );
+            }
             self.apply_pending_composition_termination();
             Ok(BOOL(if handled { 1 } else { 0 }))
         })

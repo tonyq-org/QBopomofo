@@ -114,6 +114,15 @@ pub struct Controller {
 
     // Candidate UI bookkeeping (controller tracks highlight; sink renders)
     candidate_highlight: usize,
+    /// Whether the user has deliberately engaged with the open candidate window
+    /// (opened it with Down/PageDown, or navigated it since it appeared).
+    ///
+    /// Space also opens the candidate window, which is easy to trigger by
+    /// accident when separating Chinese from a following English word. Until the
+    /// user actually engages, a printable key means "I am typing the next
+    /// syllable", not "pick a candidate" — every digit is a bopomofo key in the
+    /// Dachen layout, so treating those as selection keys silently corrupts input.
+    candidate_engaged: bool,
     last_caret_pos: Option<(i32, i32)>,
 
     // Character cursor in the fully-rendered mixed display. None means end.
@@ -151,6 +160,7 @@ impl Controller {
             space_cycle_step: 0,
             space_cycle_saved_cursor: 0,
             candidate_highlight: 0,
+            candidate_engaged: false,
             last_caret_pos: None,
             mixed_display_cursor: None,
             pending_commit: None,
@@ -229,6 +239,10 @@ impl Controller {
 
     pub fn is_shift_held(&self) -> bool {
         self.session.is_shift_held()
+    }
+
+    pub fn is_english_mode(&self) -> bool {
+        self.session.is_english_mode()
     }
 
     fn apply_user_prefs(&mut self, user_prefs: &Preferences) {
@@ -337,7 +351,12 @@ impl Controller {
             if (self.session.is_english_mode() || caps_english) && !self.session.is_shift_held() {
                 return false;
             }
+            // Only claim what the temporary-English path will actually take.
+            // Claiming e.g. Shift+Enter here and then declining it in
+            // OnKeyDown drops the key entirely in hosts that trust the
+            // OnTestKeyDown prediction.
             if self.session.is_shift_held()
+                && (ch.is_ascii_graphic() || vkey == VK_SPACE)
                 && vkey_to_keyboard_event(vkey, ch, false, ctrl, false).is_some()
             {
                 return true;
@@ -423,6 +442,15 @@ impl Controller {
         // shift+comma/period produce full-width 「，」「。」.
         if shift && is_shift_held && ch.is_ascii_alphabetic() {
             return self.handle_english_key(vkey, ch, shift, sink);
+        }
+
+        // No candidate window open yet: if this key is about to open one, record
+        // whether that was deliberate. Down/PageDown mean "show me candidates", so
+        // selection keys should work straight away. Space also opens the window but
+        // is usually just a word separator, so selection keys stay inert until the
+        // user navigates.
+        if !self.is_selecting() {
+            self.candidate_engaged = matches!(vkey, VK_DOWN | VK_UP | VK_NEXT | VK_PRIOR);
         }
 
         // Candidate selection mode — intercept before engine
@@ -781,6 +809,13 @@ impl Controller {
         // Backspace with no English content falls through.
 
         if vkey == VK_RETURN {
+            // Nothing buffered means Enter is not ours: it belongs to the
+            // application (send the message, submit the form). Eating it here
+            // makes chat boxes look frozen until some other key resets the
+            // mode, and OnTestKeyDown does not claim it in this state either.
+            if !self.has_content() {
+                return false;
+            }
             let chinese_buf = self.editor.as_ref().map_or(String::new(), |e| e.display());
             let commit_str = self.session.commit_all(&chinese_buf);
             if let Some(ed) = self.editor.as_mut() {
@@ -1016,6 +1051,29 @@ impl Controller {
 
     /// Candidate-mode key handling. Returns Some(handled) if intercepted.
     fn handle_candidate_key(&mut self, vkey: u32, ch: char, sink: &dyn InputSink) -> Option<bool> {
+        // Navigating or paging the open window is a deliberate act; from here on
+        // the user is picking a candidate, so selection keys apply.
+        if matches!(
+            vkey,
+            VK_UP | VK_DOWN | VK_LEFT | VK_RIGHT | VK_HOME | VK_END | VK_PRIOR | VK_NEXT | VK_SPACE
+        ) {
+            self.candidate_engaged = true;
+        }
+
+        // A printable key arriving before any deliberate engagement means the user
+        // is typing the next syllable, not picking a candidate. Dismiss the window
+        // and let the key reach the engine. Previously such a key was swallowed
+        // silently and the next digit landed as a selection instead — every digit
+        // is a bopomofo key in the Dachen layout, which is how 跑到 became 跑纛.
+        if !self.candidate_engaged && ch.is_ascii_graphic() {
+            if let Some(ed) = self.editor.as_mut() {
+                let _ = ed.cancel_selecting();
+            }
+            self.candidate_highlight = 0;
+            sink.hide_candidates();
+            return None;
+        }
+
         // Up/Down — UI-only highlight navigation
         if vkey == VK_UP {
             let count = self
