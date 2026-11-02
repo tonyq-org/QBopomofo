@@ -228,7 +228,7 @@ fn main() -> windows::core::Result<()> {
     eprintln!("[info] dict_path={:?}", dict_path);
     controller.activate(dict_path);
 
-    let mut cw = CandidateWindow::new();
+    let mut cw = CandidateWindow::try_new()?;
     cw.set_selection_keys(controller.selection_keys());
     let candidate_window = RefCell::new(cw);
 

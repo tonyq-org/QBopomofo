@@ -13,7 +13,7 @@
 //!     WndProc validates a magic number before dereferencing to guard against
 //!     stale window messages after destruction.
 
-use std::sync::OnceLock;
+use std::sync::Mutex;
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -27,15 +27,18 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, IsWindowVisible,
-    MoveWindow, RegisterClassExW, SetWindowLongPtrW, ShowWindow, CS_DROPSHADOW, CW_USEDEFAULT,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, IsWindow, IsWindowVisible,
+    MoveWindow, RegisterClassExW, SetWindowLongPtrW, ShowWindow, UnregisterClassW,
+    CS_DROPSHADOW, CW_USEDEFAULT,
     GWLP_USERDATA, HMENU, SW_HIDE, SW_SHOWNA, WM_ERASEBKGND, WM_PAINT, WNDCLASSEXW,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
-use crate::com::dll_instance;
+use crate::com::{ModuleLock, dll_instance, module_is_idle};
 
-static CLASS_REGISTERED: OnceLock<bool> = OnceLock::new();
+// Registration can be undone by DllCanUnloadNow and recreated later. A
+// OnceLock would retain a stale success after unregistering the class.
+static CLASS_REGISTERED: Mutex<bool> = Mutex::new(false);
 
 const WINDOW_CLASS: &str = "QBopomofo_CandidateWindow";
 
@@ -223,15 +226,22 @@ pub struct CandidateWindow {
     /// (w, h, radius) of the last applied window region — SetWindowRgn
     /// forces a full recalc/repaint, so skip it when nothing changed.
     last_rgn: (i32, i32, i32),
+    // Last field, released only after DestroyWindow has returned.
+    module_lock: Option<ModuleLock>,
 }
 
 impl CandidateWindow {
     pub fn new() -> Self {
-        ensure_class_registered();
+        Self::try_new().expect("Could not create the candidate window")
+    }
+
+    pub fn try_new() -> windows::core::Result<Self> {
+        let module_lock = ModuleLock::new();
+        ensure_class_registered()?;
 
         // Initial DPI — we'll refresh per-show in case the window moves
         // to a different monitor.
-        let paint_data = Box::into_raw(Box::new(PaintData::new(96)));
+        let mut paint_data = Box::new(PaintData::new(96));
 
         let hwnd = unsafe {
             let class_w = to_wide_null(WINDOW_CLASS);
@@ -251,18 +261,26 @@ impl CandidateWindow {
                 None,
             )
         };
-        let hwnd = hwnd.unwrap_or_default();
+        let hwnd = match hwnd {
+            Ok(hwnd) => hwnd,
+            Err(error) => {
+                paint_data.delete_gdi_objects();
+                return Err(error);
+            }
+        };
+        let paint_data = Box::into_raw(paint_data);
 
         unsafe {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, paint_data as isize);
         }
 
-        Self {
+        Ok(Self {
             hwnd,
             paint_data,
             last_pos: (100, 100),
             last_rgn: (-1, -1, -1),
-        }
+            module_lock: Some(module_lock),
+        })
     }
 
     pub fn set_selection_keys(&mut self, keys: &[char]) {
@@ -395,8 +413,17 @@ impl Drop for CandidateWindow {
         unsafe {
             // Clear USERDATA before destroying so any in-flight WM_PAINT
             // sees null and bails out.
-            SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
-            let _ = DestroyWindow(self.hwnd);
+            if IsWindow(Some(self.hwnd)).as_bool() {
+                SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
+                if DestroyWindow(self.hwnd).is_err() {
+                    // A surviving HWND still owns our WndProc (e.g. destruction
+                    // attempted on the wrong thread). Fail closed: retain both
+                    // code and paint data until process exit instead of leaving
+                    // dangling callbacks/pointers in the host.
+                    std::mem::forget(self.module_lock.take());
+                    return;
+                }
+            }
             if !self.paint_data.is_null() {
                 let mut pd = Box::from_raw(self.paint_data);
                 pd.delete_gdi_objects();
@@ -409,8 +436,9 @@ impl Drop for CandidateWindow {
 // Window class + WndProc
 // ---------------------------------------------------------------------------
 
-fn ensure_class_registered() {
-    CLASS_REGISTERED.get_or_init(|| {
+fn ensure_class_registered() -> windows::core::Result<()> {
+    let mut registered = CLASS_REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
+    if !*registered {
         let class_w = to_wide_null(WINDOW_CLASS);
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -420,11 +448,32 @@ fn ensure_class_registered() {
             lpszClassName: PCWSTR(class_w.as_ptr()),
             ..Default::default()
         };
-        unsafe {
-            RegisterClassExW(&wc);
+        if unsafe { RegisterClassExW(&wc) } == 0 {
+            return Err(windows::core::Error::from_thread());
         }
-        true
-    });
+        *registered = true;
+    }
+    Ok(())
+}
+
+/// Called only from the unload query, never from the per-keystroke path or
+/// DllMain. DLL window classes are NOT removed automatically by FreeLibrary.
+pub(crate) fn unregister_class_if_idle() -> bool {
+    let mut registered = CLASS_REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
+    if !module_is_idle() {
+        return false;
+    }
+    if *registered {
+        let class_w = to_wide_null(WINDOW_CLASS);
+        if unsafe { UnregisterClassW(PCWSTR(class_w.as_ptr()), Some(dll_instance().into())) }
+            .is_err()
+        {
+            // USER32 may still have a window using the class. Retain the DLL.
+            return false;
+        }
+        *registered = false;
+    }
+    module_is_idle()
 }
 
 unsafe extern "system" fn candidate_wnd_proc(

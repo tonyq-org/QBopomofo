@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use windows::core::{implement, Interface, GUID, HRESULT, IUnknown, Ref, BOOL, PCWSTR};
 use windows::Win32::Foundation::{
-    CLASS_E_CLASSNOTAVAILABLE, E_NOINTERFACE, HMODULE, S_FALSE, S_OK, WIN32_ERROR,
+    CLASS_E_CLASSNOTAVAILABLE, E_NOINTERFACE, E_UNEXPECTED, HMODULE, S_FALSE, S_OK, WIN32_ERROR,
 };
 use windows::Win32::System::Com::{IClassFactory, IClassFactory_Impl, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::LibraryLoader::GetModuleFileNameW;
@@ -45,7 +45,36 @@ pub const GUID_PROFILE: GUID = GUID::from_values(
 pub const DISPLAY_NAME: &str = "Q注音輸入法";
 pub const LANG_ID: u16 = 0x0404;
 
-pub(crate) static DLL_REF_COUNT: AtomicU32 = AtomicU32::new(0);
+static DLL_OBJECT_COUNT: AtomicU32 = AtomicU32::new(0);
+static DLL_SERVER_LOCKS: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(test)]
+pub(crate) static MODULE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Keep COM objects and native callbacks mapped until their owners are gone.
+/// Store this as the LAST field: Rust drops fields in declaration order, so
+/// child COM references and candidate windows must be cleaned up first.
+pub(crate) struct ModuleLock {
+    _private: (),
+}
+
+impl ModuleLock {
+    pub(crate) fn new() -> Self {
+        DLL_OBJECT_COUNT.fetch_add(1, Ordering::SeqCst);
+        Self { _private: () }
+    }
+}
+
+impl Drop for ModuleLock {
+    fn drop(&mut self) {
+        DLL_OBJECT_COUNT.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+pub(crate) fn module_is_idle() -> bool {
+    DLL_OBJECT_COUNT.load(Ordering::SeqCst) == 0
+        && DLL_SERVER_LOCKS.load(Ordering::SeqCst) == 0
+}
 
 static mut DLL_INSTANCE: HMODULE = HMODULE(std::ptr::null_mut());
 
@@ -115,15 +144,24 @@ unsafe extern "system" fn DllGetClassObject(
         if *rclsid != CLSID_QBOPOMOFO {
             return CLASS_E_CLASSNOTAVAILABLE;
         }
-        let factory: IClassFactory = QBopomofoClassFactory.into();
+        let factory: IClassFactory = QBopomofoClassFactory {
+            _module_lock: ModuleLock::new(),
+        }
+        .into();
         unsafe { factory.query(riid, ppv) }
     })
 }
 
 #[unsafe(no_mangle)]
-extern "system" fn DllCanUnloadNow() -> HRESULT {
+pub(crate) extern "system" fn DllCanUnloadNow() -> HRESULT {
     crate::com_method_hresult!("DllCanUnloadNow", {
-        if DLL_REF_COUNT.load(Ordering::SeqCst) == 0 { S_OK } else { S_FALSE }
+        // USER32 retains the window procedure even after the last HWND is
+        // destroyed. Never unload while a registered class still points here.
+        if module_is_idle() && crate::candidate_window::unregister_class_if_idle() {
+            S_OK
+        } else {
+            S_FALSE
+        }
     })
 }
 
@@ -152,7 +190,9 @@ unsafe extern "system" fn DllUnregisterServer() -> HRESULT {
 // ---------------------------------------------------------------------------
 
 #[implement(IClassFactory)]
-struct QBopomofoClassFactory;
+struct QBopomofoClassFactory {
+    _module_lock: ModuleLock,
+}
 
 impl IClassFactory_Impl for QBopomofoClassFactory_Impl {
     fn CreateInstance(
@@ -175,9 +215,13 @@ impl IClassFactory_Impl for QBopomofoClassFactory_Impl {
     fn LockServer(&self, flock: BOOL) -> windows::core::Result<()> {
         crate::com_method_unit!("LockServer", {
             if flock.as_bool() {
-                DLL_REF_COUNT.fetch_add(1, Ordering::SeqCst);
+                DLL_SERVER_LOCKS.fetch_add(1, Ordering::SeqCst);
             } else {
-                DLL_REF_COUNT.fetch_sub(1, Ordering::SeqCst);
+                DLL_SERVER_LOCKS
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                        count.checked_sub(1)
+                    })
+                    .map_err(|_| windows::core::Error::from(E_UNEXPECTED))?;
             }
             Ok(())
         })

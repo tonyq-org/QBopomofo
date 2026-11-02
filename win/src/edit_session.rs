@@ -54,14 +54,19 @@ pub struct QBEditSession {
     context: ITfContext,
     op: RefCell<Option<EditOp>>,
     result: ResultCell,
+    // A host may retain this callback independently of the text service.
+    // Drop after the context, composition/sink, and result references.
+    _module_lock: crate::com::ModuleLock,
 }
 
 impl QBEditSession {
     fn new(context: &ITfContext, op: EditOp, result: ResultCell) -> Self {
+        let module_lock = crate::com::ModuleLock::new();
         Self {
             context: context.clone(),
             op: RefCell::new(Some(op)),
             result,
+            _module_lock: module_lock,
         }
     }
 }
@@ -340,13 +345,67 @@ fn get_range_screen_position(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_session_result;
-    use windows::Win32::Foundation::S_OK;
-    use windows::Win32::UI::TextServices::TF_E_SYNCHRONOUS;
+    use super::{EditOp, QBEditSession, validate_session_result};
+    use std::{cell::RefCell, rc::Rc};
+    use windows::Win32::Foundation::{S_FALSE, S_OK};
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance,
+        CoInitializeEx, CoUninitialize,
+    };
+    use windows::Win32::UI::TextServices::{
+        CLSID_TF_ThreadMgr, ITfEditSession, ITfThreadMgr, TF_E_SYNCHRONOUS,
+    };
 
     #[test]
     fn inner_edit_session_hresult_is_not_ignored() {
         assert!(validate_session_result(S_OK).is_ok());
         assert!(validate_session_result(TF_E_SYNCHRONOUS).is_err());
+    }
+
+    #[test]
+    fn retained_edit_callback_keeps_dll_loaded_without_a_text_service() {
+        let _serial = crate::com::MODULE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        struct Apartment;
+        impl Drop for Apartment {
+            fn drop(&mut self) {
+                unsafe { CoUninitialize() };
+            }
+        }
+        struct ActiveThreadMgr(ITfThreadMgr);
+        impl Drop for ActiveThreadMgr {
+            fn drop(&mut self) {
+                let _ = unsafe { self.0.Deactivate() };
+            }
+        }
+
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+            .ok()
+            .unwrap();
+        let _apartment = Apartment;
+        let manager: ITfThreadMgr = unsafe {
+            CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)
+        }
+        .unwrap();
+        let client_id = unsafe { manager.Activate() }.unwrap();
+        let manager = ActiveThreadMgr(manager);
+        let document = unsafe { manager.0.CreateDocumentMgr() }.unwrap();
+        let mut context = None;
+        let mut cookie = 0;
+        unsafe { document.CreateContext(client_id, 0, None, &mut context, &mut cookie) }
+            .unwrap();
+        let context = context.unwrap();
+        let session: ITfEditSession = QBEditSession::new(
+            &context,
+            EditOp::EndComposition { composition: None },
+            Rc::new(RefCell::new(None)),
+        )
+        .into();
+        let retained = session.clone();
+        drop(session);
+        let while_retained = crate::com::DllCanUnloadNow();
+        unsafe { retained.DoEditSession(cookie) }.unwrap();
+        drop(retained);
+        assert_eq!(while_retained, S_FALSE);
+        assert_eq!(crate::com::DllCanUnloadNow(), S_OK);
     }
 }

@@ -71,10 +71,13 @@ pub struct QBopomofoTextService {
     tested_key: RefCell<Option<TestedKey>>,
     self_terminating_composition: Cell<bool>,
     composition_termination_pending: Cell<bool>,
+    // Last field: keep the DLL loaded through candidate/COM reference cleanup.
+    _module_lock: crate::com::ModuleLock,
 }
 
 impl QBopomofoTextService {
     pub fn new() -> Self {
+        let module_lock = crate::com::ModuleLock::new();
         Self {
             controller: RefCell::new(Controller::new()),
             state: RefCell::new(TsfState {
@@ -88,6 +91,7 @@ impl QBopomofoTextService {
             tested_key: RefCell::new(None),
             self_terminating_composition: Cell::new(false),
             composition_termination_pending: Cell::new(false),
+            _module_lock: module_lock,
         }
     }
 }
@@ -214,7 +218,7 @@ impl ITfTextInputProcessorEx_Impl for QBopomofoTextService_Impl {
 
             self.controller.borrow_mut().activate(dict_path);
 
-            let mut cw = CandidateWindow::new();
+            let mut cw = CandidateWindow::try_new()?;
             {
                 let c = self.controller.borrow();
                 cw.set_selection_keys(c.selection_keys());
@@ -786,6 +790,7 @@ mod tests {
 
     #[test]
     fn exposes_tsf_configuration_function() {
+        let _serial = crate::com::MODULE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let service = QBopomofoTextService::new();
         let unknown: IUnknown = service.into();
         let provider: ITfFunctionProvider = unknown.cast().expect("function provider");
